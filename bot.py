@@ -1,194 +1,212 @@
-
-import os
-import json
 import asyncio
+import os
 from datetime import datetime, timedelta
-from collections import defaultdict, deque
-
-from aiogram import Bot, Dispatcher, Router, F, types
-from aiogram.enums import ContentType
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher(storage=MemoryStorage())
-router = Router()
 
-# Очереди по темам
-queues = defaultdict(deque)
-# Активные чаты {user_id: partner_id}
-active_chats = {}
-# Профили
-profiles = {}
-# Жалобы и блокировки
-complaints = defaultdict(int)
-blocked = {}
+class Survey(StatesGroup):
+    country = State()
+    gender = State()
+    age = State()
 
-# Темы
-TOPICS = ["🎮 Игры", "🎵 Музыка", "📚 Книги", "💬 Просто чат"]
-topic_kb = InlineKeyboardMarkup(
-    inline_keyboard=[[InlineKeyboardButton(text=topic, callback_data=f"topic:{topic}")] for topic in TOPICS]
-)
+user_profiles = {}
+search_queue = []
+user_search_preferences = {}
+chat_pairs = {}
+complaints = {}
+blocked_users = {}
+premium_users = set()
 
-main_kb = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-    [KeyboardButton(text="➡️ Следующий"), KeyboardButton(text="❌ Стоп"), KeyboardButton(text="⚠️ Жалоба")],
-    [KeyboardButton(text="📄 Профиль")]
-])
+AGE_PRIORITY = ["До 14", "14–17", "17–21", "21–30", "Старше 30"]
 
-def is_blocked(user_id):
-    if user_id in blocked:
-        if datetime.utcnow() >= blocked[user_id]:
-            del blocked[user_id]
-        else:
-            return True
-    return False
+# Клавиатуры
 
-@router.message(F.text == "/start")
-async def cmd_start(message: Message):
-    if is_blocked(message.chat.id):
-        remaining = blocked[message.chat.id] - datetime.utcnow()
-        await message.answer(f"Вы заблокированы. Осталось: {remaining}")
-        return
-    await message.answer("Выберите тему для чата:", reply_markup=topic_kb)
+def main_menu_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🔍 Искать собеседника")],
+        [KeyboardButton(text="🌍 Сменить страну"), KeyboardButton(text="👫 Сменить пол")],
+        [KeyboardButton(text="🎂 Сменить возраст"), KeyboardButton(text="📄 Профиль")],
+        [KeyboardButton(text="⭐ Премиум")]
+    ], resize_keyboard=True)
 
-@router.callback_query(F.data.startswith("topic:"))
-async def choose_topic(callback: types.CallbackQuery):
-    topic = callback.data.split(":", 1)[1]
-    user_id = callback.from_user.id
-    await callback.message.answer(f"Ожидание собеседника по теме {topic}...", reply_markup=main_kb)
+def chat_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🚫 Пожаловаться / Завершить")]
+    ], resize_keyboard=True)
 
-    if user_id in active_chats:
-        await callback.message.answer("Вы уже в чате.")
-        return
+def country_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Украина"), KeyboardButton(text="Россия")],
+        [KeyboardButton(text="Казахстан"), KeyboardButton(text="Беларусь")]
+    ], resize_keyboard=True)
 
-    queue = queues[topic]
-    if queue:
-        partner_id = queue.popleft()
-        active_chats[user_id] = partner_id
-        active_chats[partner_id] = user_id
-        await bot.send_message(partner_id, f"Собеседник найден по теме {topic}.", reply_markup=main_kb)
-        await callback.message.answer(f"Собеседник найден по теме {topic}.")
-        update_profiles(user_id)
-        update_profiles(partner_id)
+def gender_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Мужской"), KeyboardButton(text="Женский")]
+    ], resize_keyboard=True)
+
+def age_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="До 14"), KeyboardButton(text="14–17")],
+        [KeyboardButton(text="17–21"), KeyboardButton(text="21–30")],
+        [KeyboardButton(text="Старше 30")]
+    ], resize_keyboard=True)
+
+def search_gender_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [
+            KeyboardButton(text="🔍 Найти девушку"),
+            KeyboardButton(text="🔎 Случайный пол"),
+            KeyboardButton(text="🔍 Найти парня")
+        ],
+        [KeyboardButton(text="⬅️ Назад")]
+    ], resize_keyboard=True)
+
+# Анкета
+@dp.message(F.text == "/start")
+async def start(message: types.Message, state: FSMContext):
+    await message.answer("🌍 Выберите страну:", reply_markup=country_kb())
+    await state.set_state(Survey.country)
+
+@dp.message(Survey.country)
+async def set_country(message: types.Message, state: FSMContext):
+    await state.update_data(country=message.text)
+    await message.answer("👫 Укажите пол:", reply_markup=gender_kb())
+    await state.set_state(Survey.gender)
+
+@dp.message(Survey.gender)
+async def set_gender(message: types.Message, state: FSMContext):
+    await state.update_data(gender=message.text)
+    await message.answer("🎂 Выберите возраст:", reply_markup=age_kb())
+    await state.set_state(Survey.age)
+
+@dp.message(Survey.age)
+async def set_age(message: types.Message, state: FSMContext):
+    data = await state.update_data(age=message.text)
+    user_profiles[message.from_user.id] = data
+    await state.clear()
+    await message.answer("✅ Анкета заполнена!", reply_markup=main_menu_kb())
+
+@dp.message(F.text == "🌍 Сменить страну")
+async def change_country(message: types.Message, state: FSMContext):
+    await message.answer("🌍 Выберите страну:", reply_markup=country_kb())
+    await state.set_state(Survey.country)
+
+@dp.message(F.text == "👫 Сменить пол")
+async def change_gender(message: types.Message, state: FSMContext):
+    await message.answer("👫 Укажите пол:", reply_markup=gender_kb())
+    await state.set_state(Survey.gender)
+
+@dp.message(F.text == "🎂 Сменить возраст")
+async def change_age(message: types.Message, state: FSMContext):
+    await message.answer("🎂 Выберите возраст:", reply_markup=age_kb())
+    await state.set_state(Survey.age)
+
+@dp.message(F.text == "📄 Профиль")
+async def show_profile(message: types.Message):
+    profile = user_profiles.get(message.from_user.id)
+    if profile:
+        await message.answer(
+            f"<b>🌍 Страна:</b> {profile['country']}\n"
+            f"<b>👫 Пол:</b> {profile['gender']}\n"
+            f"<b>🎂 Возраст:</b> {profile['age']}"
+        )
     else:
-        queue.append(user_id)
+        await message.answer("❗ Сначала заполните анкету: /start")
 
-def update_profiles(user_id):
-    if user_id not in profiles:
-        profiles[user_id] = {
-            "chats": 0,
-            "complaints": 0,
-            "rating": 0,
-            "rated_by": 0
-        }
-    profiles[user_id]["chats"] += 1
+@dp.message(F.text == "🔍 Искать собеседника")
+async def search_menu(message: types.Message):
+    await message.answer("Выберите параметры поиска:", reply_markup=search_gender_kb())
 
-@router.message(F.text == "❌ Стоп")
-async def stop_chat(message: Message):
-    user_id = message.chat.id
-    partner_id = active_chats.pop(user_id, None)
+@dp.message(F.text.in_(["🔍 Найти девушку", "🔍 Найти парня", "🔎 Случайный пол"]))
+async def find_chat(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        if datetime.now() < blocked_users[user_id]:
+            await message.answer("❌ Вы временно заблокированы из-за жалоб.")
+            return
+        else:
+            del blocked_users[user_id]
+
+    user_data = user_profiles.get(user_id)
+    if not user_data:
+        await message.answer("❗ Сначала пройдите анкету: /start")
+        return
+
+    preferred_gender = None
+    if message.text == "🔍 Найти девушку":
+        preferred_gender = "Женский"
+    elif message.text == "🔍 Найти парня":
+        preferred_gender = "Мужской"
+
+    for partner_id in search_queue:
+        if partner_id == user_id:
+            continue
+        partner_data = user_profiles.get(partner_id)
+        if not partner_data:
+            continue
+        if partner_data['country'] != user_data['country']:
+            continue
+        if partner_data['age'] != user_data['age']:
+            continue
+        if preferred_gender and partner_data['gender'] != preferred_gender:
+            continue
+        search_queue.remove(partner_id)
+        chat_pairs[user_id] = partner_id
+        chat_pairs[partner_id] = user_id
+        await bot.send_message(partner_id, "🌟 Найден собеседник!", reply_markup=chat_kb())
+        await bot.send_message(user_id, "🌟 Найден собеседник!", reply_markup=chat_kb())
+        return
+
+    if user_id not in search_queue:
+        if user_id in premium_users:
+            search_queue.insert(0, user_id)
+        else:
+            search_queue.append(user_id)
+    await message.answer("⌛ Ожидаем собеседника...")
+
+@dp.message(F.text == "⬅️ Назад")
+async def back_to_main(message: types.Message):
+    await message.answer("Вы вернулись в главное меню.", reply_markup=main_menu_kb())
+
+@dp.message(F.text == "🚫 Пожаловаться / Завершить")
+async def end_chat(message: types.Message):
+    user_id = message.from_user.id
+    partner_id = chat_pairs.pop(user_id, None)
     if partner_id:
-        active_chats.pop(partner_id, None)
-        await bot.send_message(partner_id, "Собеседник покинул чат. Оцените его: /like или /dislike")
-        await message.answer("Вы покинули чат. Оцените собеседника: /like или /dislike")
+        chat_pairs.pop(partner_id, None)
+        await bot.send_message(partner_id, "⛔ Собеседник завершил чат.", reply_markup=main_menu_kb())
+        await bot.send_message(user_id, "✉️ Жалоба отправлена.", reply_markup=main_menu_kb())
+        complaints[partner_id] = complaints.get(partner_id, 0) + 1
+        if complaints[partner_id] >= 10:
+            blocked_users[partner_id] = datetime.now() + timedelta(days=1)
     else:
-        for queue in queues.values():
-            if user_id in queue:
-                queue.remove(user_id)
-                await message.answer("Вы покинули очередь.")
-                return
-        await message.answer("Вы не в чате.")
+        await message.answer("❗ Вы не в чате", reply_markup=main_menu_kb())
 
-@router.message(F.text == "➡️ Следующий")
-async def next_chat(message: Message):
-    await stop_chat(message)
-    await cmd_start(message)
-
-@router.message(F.text == "⚠️ Жалоба")
-async def complaint(message: Message):
-    partner_id = active_chats.get(message.chat.id)
-    if not partner_id:
-        await message.answer("Вы не в чате.")
-        return
-    complaints[partner_id] += 1
-    profiles[partner_id]["complaints"] += 1
-    await message.answer("Жалоба отправлена.")
-    if complaints[partner_id] >= 10:
-        blocked[partner_id] = datetime.utcnow() + timedelta(hours=24)
-        await bot.send_message(partner_id, "Вы получили 10 жалоб и были заблокированы на 24 часа.")
-
-@router.message(F.text == "📄 Профиль")
-async def profile(message: Message):
-    user_id = message.chat.id
-    p = profiles.get(user_id, {
-        "chats": 0,
-        "complaints": 0,
-        "rating": 0,
-        "rated_by": 0
-    })
-    avg_rating = p["rating"] / p["rated_by"] if p["rated_by"] else 0
-    await message.answer(
-    f"📊 Профиль:\n"
-    f"Чатов: {p['chats']}\n"
-    f"Жалоб: {p['complaints']}\n"
-    f"Рейтинг: {avg_rating:.1f} ⭐️"
-)
-
-
-@router.message(F.text == "/like")
-async def like(message: Message):
-    partner_id = None
-    for uid, pid in active_chats.items():
-        if pid == message.chat.id:
-            partner_id = uid
-            break
-    if partner_id and partner_id in profiles:
-        profiles[partner_id]["rating"] += 1
-        profiles[partner_id]["rated_by"] += 1
-        await message.answer("Спасибо за оценку!")
-    else:
-        await message.answer("Нет собеседника для оценки.")
-
-@router.message(F.text == "/dislike")
-async def dislike(message: Message):
-    partner_id = None
-    for uid, pid in active_chats.items():
-        if pid == message.chat.id:
-            partner_id = uid
-            break
-    if partner_id and partner_id in profiles:
-        profiles[partner_id]["rated_by"] += 1
-        await message.answer("Спасибо за оценку!")
-    else:
-        await message.answer("Нет собеседника для оценки.")
-
-@router.message()
-async def relay(message: Message):
-    partner_id = active_chats.get(message.chat.id)
-    if not partner_id:
-        await message.answer("Вы не в чате. Нажмите /start.")
-        return
-    try:
-        ct = message.content_type
-        if ct == ContentType.TEXT:
-            await bot.send_message(partner_id, message.text)
-        elif ct == ContentType.PHOTO:
-            await bot.send_photo(partner_id, message.photo[-1].file_id, caption=message.caption)
-        elif ct == ContentType.VIDEO:
-            await bot.send_video(partner_id, message.video.file_id, caption=message.caption)
-        elif ct == ContentType.VOICE:
-            await bot.send_voice(partner_id, message.voice.file_id)
-        else:
-            await message.reply("Тип контента не поддерживается.")
-    except Exception as e:
-        await message.reply("Ошибка при пересылке.")
+@dp.message()
+async def chat_forward(message: types.Message):
+    user_id = message.from_user.id
+    partner_id = chat_pairs.get(user_id)
+    if partner_id:
+        await bot.send_message(partner_id, message.text)
 
 async def main():
-    dp.include_router(router)
+    print("✅ Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
