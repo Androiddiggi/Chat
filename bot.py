@@ -13,14 +13,14 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+TOKEN = "7705314975:AAGKTnADtMLtstoc2XdUY5ysepmnAp-bn6w"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # --- ТАРИФЫ И КОНСТАНТЫ ---
 STARS_PRICES = {"7days": 60, "1month": 120, "6months": 300, "1year": 600}
-UNBAN_PRICE = 20  # Цена разбана в звездах
+UNBAN_PRICE = 20  # Цена разбана в Telegram Stars
 
 INTERESTS_LIST = [
     "Ролевые игры", "Мемы", "Одиночество", "Флирт",
@@ -149,14 +149,14 @@ def count_referrals(user_id):
     conn.close()
     return count
 
-# --- СТРУКТУРЫ ДАННЫХ ---
+# --- СТРУКТУРЫ ДАННЫХ ЧАТА ---
 queue = []
 active_chats = {}
 
 class SettingsStates(StatesGroup):
     waiting_for_age = State()
 
-# --- КЛАВИАТУРЫ ---
+# --- ТЕКСТОВЫЕ КНОПКИ (КЛАВИАТУРА МЕНЮ) ---
 BTN_SEARCH_ANY = "🚀 Поиск любого собеседника"
 BTN_SEARCH_F = "🙋‍♀️ Поиск Ж (Premium 💎)"
 BTN_SEARCH_M = "🙋‍♂️ Поиск М (Premium 💎)"
@@ -206,7 +206,7 @@ def get_unban_kb():
         [InlineKeyboardButton(text=f"⚡ Мгновенный разбан — ⭐ {UNBAN_PRICE} Stars", callback_data="buy_unban")]
     ])
 
-# --- ЛОГИКА ПОИСКА ---
+# --- ЛОГИКА ПОИСКА ПАРТНЕРОВ ---
 async def try_match(user_id, target_gender):
     _, _, interests, is_vip, _, karma, _, _ = get_user_db(user_id)
     
@@ -247,7 +247,6 @@ async def try_match(user_id, target_gender):
 
     if partner_id:
         active_chats[user_id] = partner_id
-        active_chats[partner_id] = partner_id
         active_chats[partner_id] = user_id
         
         await bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_game_kb())
@@ -271,7 +270,7 @@ async def close_chat(user_id, partner_id, initiator_id):
     await bot.send_message(initiator_id, "Вы закончили связь с собеседником 🙄\n\n" + text_report, reply_markup=get_report_kb(partner_id if initiator_id == user_id else user_id))
     await bot.send_message(partner_id if initiator_id == user_id else user_id, "Собеседник прервал диалог 😢\n\n" + text_report, reply_markup=get_report_kb(initiator_id))
 
-# --- ХЕНДЛЕР СТАРТА С РЕФЕРАЛЬНОЙ СИСТЕМОЙ ---
+# --- КОМАНДА СТАРТ + РЕФЕРАЛЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
@@ -283,11 +282,10 @@ async def cmd_start(message: Message):
     exists = cur.fetchone()
     conn.close()
     
-    gender, age, interests, is_vip, vip_until, karma, last_daily, referrer_id = get_user_db(user_id)
-    
     if not exists and len(args) > 1 and args[1].isdigit():
         ref_id = int(args[1])
         if ref_id != user_id:
+            get_user_db(user_id) # Создаем запись нового юзера
             update_user_db(user_id, "referrer_id", ref_id)
             change_karma(ref_id, 20)
             add_vip_days(ref_id, 1)
@@ -295,9 +293,10 @@ async def cmd_start(message: Message):
                 await bot.send_message(ref_id, "🎉 По вашей ссылке зарегистрировался новый пользователь!\n🎁 Вам начислено: *+20 Кармы* и *1 день VIP*!", parse_mode="Markdown")
             except Exception: pass
 
+    get_user_db(user_id)
     await message.answer("👋 Добро пожаловать в анонимный чат!\n\nИспользуйте меню для поиска собеседников.", reply_markup=get_search_menu_kb())
 
-# --- ХЕНДЛЕР ПРОФИЛЯ С ЕЖЕДНЕВНОЙ НАГРАДОЙ ---
+# --- ОТОБРАЖЕНИЕ ПРОФИЛЯ ---
 @dp.message(F.text == BTN_PROFILE)
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
@@ -337,24 +336,7 @@ async def cmd_profile(message: Message):
 
     await message.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
 
-# --- ИГРА «ЛЕДОКОЛ» ВНУТРИ ЧАТА ---
-@dp.callback_query(F.data == "play_icebreaker")
-async def callback_icebreaker(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id not in active_chats:
-        await callback.answer("Вы не находитесь в активном диалоге.", show_alert=True)
-        return
-        
-    partner_id = active_chats[user_id]
-    question = random.choice(ICEBREAK_QUESTIONS)
-    
-    game_msg = f"🎲 *Игра «Разговорный ледокол»*\n━━━━━━━━━━━━━━━━━━━━\nВопрос для обсуждения:\n\n_\"{question}\"_"
-    
-    await bot.send_message(user_id, game_msg, parse_mode="Markdown")
-    await bot.send_message(partner_id, game_msg, parse_mode="Markdown")
-    await callback.answer()
-
-# --- ИНЛАЙН ОБРАБОТКА РЕФЕРАЛОВ И VIP ---
+# --- ПОДФУНКЦИИ ПРОФИЛЯ: РЕФЕРАЛЫ, VIP, НАЗАД ---
 @dp.callback_query(F.data == "open_refs")
 async def callback_open_refs(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -369,24 +351,50 @@ async def callback_open_refs(callback: CallbackQuery):
         f"• *+20 к Карме*\n"
         f"• *1 день VIP-статуса бесплатно!*"
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_profile")]]))
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в профиль", callback_data="back_to_profile")]]))
+    await callback.answer()
 
 @dp.callback_query(F.data == "open_vip_menu")
 @dp.callback_query(F.data == "back_to_periods")
 async def callback_vip_menu(callback: CallbackQuery):
     await callback.message.edit_text("👑 *Покупка Premium доступа за Telegram Stars:*\n\nВыберите нужный период подписки:", reply_markup=get_stars_periods_kb())
+    await callback.answer()
 
 @dp.callback_query(F.data == "back_to_profile")
 async def callback_back_profile(callback: CallbackQuery):
-    await callback.message.delete()
-    gender, age, _, is_vip, vip_until, karma, _, _ = get_user_db(callback.from_user.id)
-    likes, dislikes = get_user_stats(callback.from_user.id)
+    user_id = callback.from_user.id
+    gender, age, _, is_vip, vip_until, karma, _, _ = get_user_db(user_id)
+    likes, dislikes = get_user_stats(user_id)
     g_text = "👨 Мужской" if gender == "M" else "👩 Женский"
-    v_text = "💎 Premium" if is_vip else "Обычный"
-    profile_text = f"👤 *Ваш профиль:*\n━━━━━━━━━━━━━━━━━━━━\n📝 *Пол:* {g_text}\n🔢 *Возраст:* {age} лет\n👑 *Статус:* {v_text}\n\n📊 *Статистика откликов:*\n🔋 *Общая Карма:* {karma}\n👍 *Лайков:* {likes} | 👎 *Дизлайков:* {dislikes}"
-    await callback.message.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    
+    if is_vip:
+        time_left = vip_until - int(time.time())
+        days_left = max(1, round(time_left / 86400))
+        v_text = f"💎 Premium (осталось {days_left} дн.)"
+    else:
+        v_text = "Обычный пользователь"
+        
+    profile_text = f"👤 *Ваш профиль:*\n━━━━━━━━━━━━━━━━━━━━\n📝 *Пол:* {g_text}\n🔢 *Возраст:* {age} лет\n👑 *Статус:* {v_text}\n\n📊 *Статистика отзывов:*\n🔋 *Общая Карма:* {karma}\n👍 *Лайков:* {likes} | 👎 *Дизлайков:* {dislikes}"
+    await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    await callback.answer()
 
-# --- ПОИСК И ДИАЛОГИ ---
+# --- ИГРА ВНУТРИ ЧАТА ---
+@dp.callback_query(F.data == "play_icebreaker")
+async def callback_icebreaker(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in active_chats:
+        await callback.answer("Вы не в активном диалоге.", show_alert=True)
+        return
+        
+    partner_id = active_chats[user_id]
+    question = random.choice(ICEBREAK_QUESTIONS)
+    game_msg = f"🎲 *Игра «Разговорный ледокол»*\n━━━━━━━━━━━━━━━━━━━━\nВопрос для обсуждения:\n\n_\"{question}\"_"
+    
+    await bot.send_message(user_id, game_msg, parse_mode="Markdown")
+    await bot.send_message(partner_id, game_msg, parse_mode="Markdown")
+    await callback.answer()
+
+# --- ОБРАБОТКА ПОИСКА ---
 @dp.message(F.text.in_([BTN_SEARCH_F, BTN_SEARCH_M]))
 async def search_by_gender(message: Message):
     user_id = message.from_user.id
@@ -415,24 +423,21 @@ async def cmd_stop(message: Message):
     else:
         await message.answer("Ты сейчас ни с кем не общаешься.", reply_markup=get_search_menu_kb())
 
-# --- ПРЯМАЯ ПЕРЕСЫЛКА КОНТЕНТА БЕЗ ОГРАНИЧЕНИЙ ---
+# --- СВОБОДНЫЙ ЧАТ-РОУТЕР БЕЗ ОГРАНИЧЕНИЙ ДАННЫХ ---
 @dp.message()
 async def chat_router(message: Message):
     user_id = message.from_user.id
-    
     if user_id not in active_chats:
         await message.answer("Вы не находитесь в чате. Нажмите кнопку поиска.", reply_markup=get_search_menu_kb())
         return
         
     partner_id = active_chats[user_id]
-    
-    # Свободная пересылка любого типа сообщений (Текст, Ссылки, Фото, Видео, Голосовые, Кружочки и т.д.)
     try:
         await message.send_copy(chat_id=partner_id)
     except Exception:
-        await message.answer("⚠️ Сообщение не доставлено. Возможно, собеседник отключился.")
+        await message.answer("⚠️ Сообщение не доставлено. Возможно, собеседник вышел.")
 
-# --- ПРИЕМ ПЛАТЕЖЕЙ И КУПЛЯ РАЗБАНА (STARS) ---
+# --- РАБОТА С ПЛАТЕЖАМИ TELEGRAM STARS ---
 @dp.callback_query(F.data.startswith("buy_stars_"))
 async def process_stars_invoice(callback: CallbackQuery):
     await callback.answer()
@@ -476,9 +481,9 @@ async def process_successful_payment(message: Message):
         
     elif payload == "unban_stars":
         update_user_db(user_id, "karma", 100)
-        await message.answer("⚡ *Ваш аккаунт успешно разблокирован!* Ваша карма восстановлена до 100. Приятного общения.", parse_mode="Markdown", reply_markup=get_search_menu_kb())
+        await message.answer("⚡ *Ваш аккаунт успешно разблокирован!* Ваша карма восстановлена до 100.", parse_mode="Markdown", reply_markup=get_search_menu_kb())
 
-# --- ХЕНДЛЕРЫ ОТЗЫВОВ И НАСТРОЕК (ПОЛ/ВОЗРАСТ/ИНТЕРЕСЫ) ---
+# --- ОЦЕНКИ, ЖАЛОБЫ И СМЕНА ДАННЫХ ---
 @dp.callback_query(F.data.startswith("rate_"))
 async def process_rating(callback: CallbackQuery):
     data_parts = callback.data.split("_")
@@ -504,6 +509,7 @@ async def inline_toggle_gender(callback: CallbackQuery):
     update_user_db(user_id, "gender", "F" if gender == "M" else "M")
     await callback.answer("Пол изменен!")
     await callback.message.delete()
+    # Сразу имитируем вывод обновленного профиля в текстовом виде
     await cmd_profile(callback.message)
 
 @dp.callback_query(F.data == "change_age")
@@ -521,6 +527,7 @@ async def process_change_age(message: Message, state: FSMContext):
     else:
         await message.answer("Введите корректное число.")
 
+# --- ИНТЕРЕСЫ ТЕГИ ---
 def build_interests_keyboard(user_interests_str):
     active_set = set(user_interests_str.split(",")) if user_interests_str else set()
     buttons = []
@@ -556,10 +563,11 @@ async def callback_tag_reset(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=build_interests_keyboard(""))
     await callback.answer("Сброшено")
 
+# --- ЗАПУСК ---
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
-    print("Бот запущен. Ограничения на пересылку медиа успешно убраны!")
+    print("Ультимативный бот успешно собран и запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
