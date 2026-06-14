@@ -423,20 +423,6 @@ async def cmd_stop(message: Message):
     else:
         await message.answer("Ты сейчас ни с кем не общаешься.", reply_markup=get_search_menu_kb())
 
-# --- СВОБОДНЫЙ ЧАТ-РОУТЕР БЕЗ ОГРАНИЧЕНИЙ ДАННЫХ ---
-@dp.message()
-async def chat_router(message: Message):
-    user_id = message.from_user.id
-    if user_id not in active_chats:
-        await message.answer("Вы не находитесь в чате. Нажмите кнопку поиска.", reply_markup=get_search_menu_kb())
-        return
-        
-    partner_id = active_chats[user_id]
-    try:
-        await message.send_copy(chat_id=partner_id)
-    except Exception:
-        await message.answer("⚠️ Сообщение не доставлено. Возможно, собеседник вышел.")
-
 # --- РАБОТА С ПЛАТЕЖАМИ TELEGRAM STARS ---
 @dp.callback_query(F.data.startswith("buy_stars_"))
 async def process_stars_invoice(callback: CallbackQuery):
@@ -509,7 +495,6 @@ async def inline_toggle_gender(callback: CallbackQuery):
     update_user_db(user_id, "gender", "F" if gender == "M" else "M")
     await callback.answer("Пол изменен!")
     await callback.message.delete()
-    # Сразу имитируем вывод обновленного профиля в текстовом виде
     await cmd_profile(callback.message)
 
 @dp.callback_query(F.data == "change_age")
@@ -563,11 +548,30 @@ async def callback_tag_reset(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=build_interests_keyboard(""))
     await callback.answer("Сброшено")
 
+# --- СВОБОДНЫЙ ЧАТ-РОУТЕР БЕЗ ОГРАНИЧЕНИЙ ДАННЫХ (ТЕПЕРЬ СТРОГО В КОНЦЕ) ---
+@dp.message()
+async def chat_router(message: Message):
+    user_id = message.from_user.id
+    
+    # Игнорируем любые системные команды, чтобы они обрабатывались хендлерами выше
+    if message.text and message.text.startswith("/"):
+        return
+
+    if user_id not in active_chats:
+        await message.answer("Вы не находитесь в чате. Нажмите кнопку поиска.", reply_markup=get_search_menu_kb())
+        return
+        
+    partner_id = active_chats[user_id]
+    try:
+        await message.send_copy(chat_id=partner_id)
+    except Exception:
+        await message.answer("⚠️ Сообщение не доставлено. Возможно, собеседник вышел.")
+
 # --- ЗАПУСК ---
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
-    print("Ультимативный бот успешно собран и запущен!")
+    print("Ультимативный бот успешно собран, порядок хендлеров исправлен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
