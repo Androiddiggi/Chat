@@ -295,12 +295,8 @@ async def cmd_start(message: Message):
 
     get_user_db(user_id)
     await message.answer("👋 Добро пожаловать в анонимный чат!\n\nИспользуйте меню для поиска собеседников.", reply_markup=get_search_menu_kb())
-
 # --- ОТОБРАЖЕНИЕ ПРОФИЛЯ ---
-@dp.message(F.text == BTN_PROFILE)
-@dp.message(Command("profile"))
-async def cmd_profile(message: Message):
-    user_id = message.from_user.id
+async def send_or_edit_profile(user_id: int, message_or_callback):
     gender, age, _, is_vip, vip_until, karma, last_daily, _ = get_user_db(user_id)
     likes, dislikes = get_user_stats(user_id)
     
@@ -334,7 +330,31 @@ async def cmd_profile(message: Message):
     if daily_bonus_applied:
         profile_text += "\n🎁 *Вам начислена ежедневная награда: +2 к Карме!*"
 
-    await message.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    if isinstance(message_or_callback, Message):
+        await message_or_callback.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    elif isinstance(message_or_callback, CallbackQuery):
+        await message_or_callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+
+@dp.message(F.text == BTN_PROFILE)
+@dp.message(Command("profile"))
+async def cmd_profile(message: Message):
+    await send_or_edit_profile(message.from_user.id, message)
+
+@dp.callback_query(F.data == "back_to_profile")
+async def callback_back_profile(callback: CallbackQuery):
+    await send_or_edit_profile(callback.from_user.id, callback)
+    await callback.answer()
+
+@dp.callback_query(F.data == "toggle_gender")
+async def inline_toggle_gender(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    gender, _, _, _, _, _, _, _ = get_user_db(user_id)
+    update_user_db(user_id, "gender", "F" if gender == "M" else "M")
+    await callback.answer("Пол изменен!")
+    # Обновляем сообщение профиля вместо его удаления и повторной отправки
+    await send_or_edit_profile(user_id, callback)
+
+
 
 # --- ПОДФУНКЦИИ ПРОФИЛЯ: РЕФЕРАЛЫ, VIP, НАЗАД ---
 @dp.callback_query(F.data == "open_refs")
