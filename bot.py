@@ -22,7 +22,7 @@ from aiogram.types import (
 )
 
 # ⚠️ Укажите токен через переменную окружения BOT_TOKEN или вставьте в строку
-TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_БОТА")
+TOKEN = os.getenv("BOT_TOKEN", "7705314975:AAEI019teGfa2thY85w_VQlR-Lv1p3xkhsg")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
