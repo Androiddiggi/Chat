@@ -12,6 +12,7 @@ from aiogram.types import (
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.exceptions import TelegramBadRequest
 
 TOKEN = "7705314975:AAGZ8DW2q77le-_SB8t2J16C1_d6W6oPjVs"
 
@@ -20,7 +21,7 @@ dp = Dispatcher()
 
 # --- ТАРИФЫ И КОНСТАНТЫ ---
 STARS_PRICES = {"7days": 60, "1month": 120, "6months": 300, "1year": 600}
-UNBAN_PRICE = 20  # Цена разбана в Telegram Stars
+UNBAN_PRICE = 20
 
 INTERESTS_LIST = [
     "Ролевые игры", "Мемы", "Одиночество", "Флирт",
@@ -33,17 +34,7 @@ ICEBREAK_QUESTIONS = [
     "Какое твое самое странное увлечение, о котором мало кто знает?",
     "Если бы у тебя был 1 миллион долларов, на что бы ты его потратил прямо сейчас?",
     "Какой фильм или сериал ты готов пересматривать бесконечно?",
-    "Опиши свой идеальный день от начала и до конца.",
-    "Какую суперсилу вы бы выбрали и почему?",
-    "Что тебя больше всего раздражает в людях?",
-    "Какое твое самое яркое воспоминание из детства?",
-    "Веришь ли ты в любовь с первого взгляда или это миф?",
-    "Какое самое безумное решение ты принимал в своей жизни?",
-    "Если бы ты мог изменить одно правило в мире, что бы это было?",
-    "Твой любимый способ расслабиться после тяжелого дня?",
-    "Кем ты мечтал стать в детстве и кем стал в итоге?",
-    "Какая песня у тебя сейчас на репите?",
-    "Поделись своим главным страхом."
+    "Опиши свой идеальный день от начала и до конца."
 ]
 
 # --- БАЗА ДАННЫХ ---
@@ -285,7 +276,7 @@ async def cmd_start(message: Message):
     if not exists and len(args) > 1 and args[1].isdigit():
         ref_id = int(args[1])
         if ref_id != user_id:
-            get_user_db(user_id) # Создаем запись нового юзера
+            get_user_db(user_id)
             update_user_db(user_id, "referrer_id", ref_id)
             change_karma(ref_id, 20)
             add_vip_days(ref_id, 1)
@@ -295,8 +286,9 @@ async def cmd_start(message: Message):
 
     get_user_db(user_id)
     await message.answer("👋 Добро пожаловать в анонимный чат!\n\nИспользуйте меню для поиска собеседников.", reply_markup=get_search_menu_kb())
-# --- ОТОБРАЖЕНИЕ ПРОФИЛЯ ---
-async def send_or_edit_profile(user_id: int, message_or_callback):
+
+# --- ВУНКЦИЯ РЕНДЕРИНГА ПРОФИЛЯ ---
+async def render_profile(user_id: int, event):
     gender, age, _, is_vip, vip_until, karma, last_daily, _ = get_user_db(user_id)
     likes, dislikes = get_user_stats(user_id)
     
@@ -330,31 +322,44 @@ async def send_or_edit_profile(user_id: int, message_or_callback):
     if daily_bonus_applied:
         profile_text += "\n🎁 *Вам начислена ежедневная награда: +2 к Карме!*"
 
-    if isinstance(message_or_callback, Message):
-        await message_or_callback.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
-    elif isinstance(message_or_callback, CallbackQuery):
-        await message_or_callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    try:
+        if isinstance(event, Message):
+            await event.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+        elif isinstance(event, CallbackQuery):
+            await event.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    except TelegramBadRequest:
+        pass
 
+# --- ОТОБРАЖЕНИЕ ПРОФИЛЯ И СМЕНА ДАННЫХ ---
 @dp.message(F.text == BTN_PROFILE)
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
-    await send_or_edit_profile(message.from_user.id, message)
-
-@dp.callback_query(F.data == "back_to_profile")
-async def callback_back_profile(callback: CallbackQuery):
-    await send_or_edit_profile(callback.from_user.id, callback)
-    await callback.answer()
+    await render_profile(message.from_user.id, message)
 
 @dp.callback_query(F.data == "toggle_gender")
 async def inline_toggle_gender(callback: CallbackQuery):
     user_id = callback.from_user.id
     gender, _, _, _, _, _, _, _ = get_user_db(user_id)
-    update_user_db(user_id, "gender", "F" if gender == "M" else "M")
-    await callback.answer("Пол изменен!")
-    # Обновляем сообщение профиля вместо его удаления и повторной отправки
-    await send_or_edit_profile(user_id, callback)
+    new_gender = "F" if gender == "M" else "M"
+    update_user_db(user_id, "gender", new_gender)
+    await callback.answer(f"Пол изменен на {'Женский' if new_gender == 'F' else 'Мужской'}!")
+    await render_profile(user_id, callback)
 
+@dp.callback_query(F.data == "change_age")
+async def inline_change_age(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SettingsStates.waiting_for_age)
+    await callback.message.answer("🔢 Введите ваш новый возраст (число от 12 до 99):")
 
+@dp.message(SettingsStates.waiting_for_age)
+async def process_change_age(message: Message, state: FSMContext):
+    if message.text and message.text.isdigit() and 12 <= int(message.text) <= 99:
+        update_user_db(message.from_user.id, "age", int(message.text))
+        await state.clear()
+        await message.answer("✅ Возраст успешно изменен!", reply_markup=get_search_menu_kb())
+        await render_profile(message.from_user.id, message)
+    else:
+        await message.answer("⚠️ Пожалуйста, введите корректный возраст числом (от 12 до 99).")
 
 # --- ПОДФУНКЦИИ ПРОФИЛЯ: РЕФЕРАЛЫ, VIP, НАЗАД ---
 @dp.callback_query(F.data == "open_refs")
@@ -382,20 +387,7 @@ async def callback_vip_menu(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "back_to_profile")
 async def callback_back_profile(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    gender, age, _, is_vip, vip_until, karma, _, _ = get_user_db(user_id)
-    likes, dislikes = get_user_stats(user_id)
-    g_text = "👨 Мужской" if gender == "M" else "👩 Женский"
-    
-    if is_vip:
-        time_left = vip_until - int(time.time())
-        days_left = max(1, round(time_left / 86400))
-        v_text = f"💎 Premium (осталось {days_left} дн.)"
-    else:
-        v_text = "Обычный пользователь"
-        
-    profile_text = f"👤 *Ваш профиль:*\n━━━━━━━━━━━━━━━━━━━━\n📝 *Пол:* {g_text}\n🔢 *Возраст:* {age} лет\n👑 *Статус:* {v_text}\n\n📊 *Статистика отзывов:*\n🔋 *Общая Карма:* {karma}\n👍 *Лайков:* {likes} | 👎 *Дизлайков:* {dislikes}"
-    await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
+    await render_profile(callback.from_user.id, callback)
     await callback.answer()
 
 # --- ИГРА ВНУТРИ ЧАТА ---
@@ -489,7 +481,7 @@ async def process_successful_payment(message: Message):
         update_user_db(user_id, "karma", 100)
         await message.answer("⚡ *Ваш аккаунт успешно разблокирован!* Ваша карма восстановлена до 100.", parse_mode="Markdown", reply_markup=get_search_menu_kb())
 
-# --- ОЦЕНКИ, ЖАЛОБЫ И СМЕНА ДАННЫХ ---
+# --- ОЦЕНКИ, ЖАЛОБЫ И ТЕГИ ---
 @dp.callback_query(F.data.startswith("rate_"))
 async def process_rating(callback: CallbackQuery):
     data_parts = callback.data.split("_")
@@ -508,31 +500,6 @@ async def process_reporting(callback: CallbackQuery):
     await callback.answer("Жалоба отправлена!", show_alert=True)
     await callback.message.edit_text(text=callback.message.text + f"\n\n✅ *Отправлена жалоба на собеседника.*", parse_mode="Markdown", reply_markup=None)
 
-@dp.callback_query(F.data == "toggle_gender")
-async def inline_toggle_gender(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    gender, _, _, _, _, _, _, _ = get_user_db(user_id)
-    update_user_db(user_id, "gender", "F" if gender == "M" else "M")
-    await callback.answer("Пол изменен!")
-    await callback.message.delete()
-    await cmd_profile(callback.message)
-
-@dp.callback_query(F.data == "change_age")
-async def inline_change_age(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("Введите ваш новый возраст (числом):")
-    await state.set_state(SettingsStates.waiting_for_age)
-
-@dp.message(SettingsStates.waiting_for_age)
-async def process_change_age(message: Message, state: FSMContext):
-    if message.text.isdigit():
-        update_user_db(message.from_user.id, "age", int(message.text))
-        await state.clear()
-        await message.answer("✅ Возраст изменен!", reply_markup=get_search_menu_kb())
-    else:
-        await message.answer("Введите корректное число.")
-
-# --- ИНТЕРЕСЫ ТЕГИ ---
 def build_interests_keyboard(user_interests_str):
     active_set = set(user_interests_str.split(",")) if user_interests_str else set()
     buttons = []
@@ -568,12 +535,16 @@ async def callback_tag_reset(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=build_interests_keyboard(""))
     await callback.answer("Сброшено")
 
-# --- СВОБОДНЫЙ ЧАТ-РОУТЕР БЕЗ ОГРАНИЧЕНИЙ ДАННЫХ (ТЕПЕРЬ СТРОГО В КОНЦЕ) ---
+# --- СВОБОДНЫЙ ЧАТ-РОУТЕР С ИСКЛЮЧЕНИЕМ ДЛЯ FSM ---
 @dp.message()
-async def chat_router(message: Message):
+async def chat_router(message: Message, state: FSMContext):
+    # Пропускаем, если пользователь сейчас меняет возраст или вводит другое состояние
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
     user_id = message.from_user.id
     
-    # Игнорируем любые системные команды, чтобы они обрабатывались хендлерами выше
     if message.text and message.text.startswith("/"):
         return
 
