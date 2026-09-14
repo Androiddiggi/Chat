@@ -21,7 +21,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-# ⚠️ Укажите токен через переменную окружения BOT_TOKEN или вставьте в строку
 TOKEN = os.getenv("BOT_TOKEN", "7705314975:AAEI019teGfa2thY85w_VQlR-Lv1p3xkhsg")
 
 bot = Bot(token=TOKEN)
@@ -29,7 +28,7 @@ dp = Dispatcher()
 
 # --- ТАРИФЫ И КОНСТАНТЫ ---
 STARS_PRICES = {"7days": 60, "1month": 120, "6months": 300, "1year": 600}
-UNBAN_PRICE = 20  # Цена разбана в Telegram Stars
+UNBAN_PRICE = 20
 
 INTERESTS_LIST = [
     "Ролевые игры", "Мемы", "Одиночество", "Флирт",
@@ -163,22 +162,38 @@ def count_referrals(user_id):
 # --- СТРУКТУРЫ ДАННЫХ ЧАТА ---
 queue = []
 active_chats = {}
+user_last_search_target = {}
 
 class SettingsStates(StatesGroup):
     waiting_for_age = State()
 
-# --- КЛАВИАТУРЫ ---
+# --- КЛАВИАТУРЫ МЕНЮ ---
 BTN_SEARCH_ANY = "🚀 Поиск любого собеседника"
 BTN_SEARCH_F = "🙋‍♀️ Поиск Ж (Premium 💎)"
 BTN_SEARCH_M = "🙋‍♂️ Поиск М (Premium 💎)"
 BTN_INTERESTS = "📖 Интересы поиска"
 BTN_PROFILE = "👤 Мой профиль"
 
+# Кнопки управления состояниями
+BTN_CANCEL_SEARCH = "❌ Отменить поиск"
+BTN_STOP_CHAT = "🛑 Остановить диалог"
+BTN_NEXT_CHAT = "⏭ Следующий собеседник"
+
 def get_search_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text=BTN_SEARCH_ANY)],
         [KeyboardButton(text=BTN_SEARCH_F), KeyboardButton(text=BTN_SEARCH_M)],
         [KeyboardButton(text=BTN_INTERESTS), KeyboardButton(text=BTN_PROFILE)]
+    ], resize_keyboard=True)
+
+def get_searching_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text=BTN_CANCEL_SEARCH)]
+    ], resize_keyboard=True)
+
+def get_active_chat_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text=BTN_STOP_CHAT), KeyboardButton(text=BTN_NEXT_CHAT)]
     ], resize_keyboard=True)
 
 def get_stars_periods_kb():
@@ -270,6 +285,7 @@ async def try_match(user_id, target_gender):
         )
         return
 
+    user_last_search_target[user_id] = target_gender
     u_ints = set(interests.split(",")) if interests else set()
     partner_id = None
     
@@ -304,8 +320,11 @@ async def try_match(user_id, target_gender):
         active_chats[user_id] = partner_id
         active_chats[partner_id] = user_id
         
-        await bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_game_kb())
-        await bot.send_message(partner_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_game_kb())
+        await bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_active_chat_kb())
+        await bot.send_message(user_id, "🎲 Нажмите для старта темы разговора:", reply_markup=get_game_kb())
+
+        await bot.send_message(partner_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_active_chat_kb())
+        await bot.send_message(partner_id, "🎲 Нажмите для старта темы разговора:", reply_markup=get_game_kb())
     else:
         if not any(q["user_id"] == user_id for q in queue):
             data = {"user_id": user_id, "target_gender": target_gender}
@@ -313,7 +332,7 @@ async def try_match(user_id, target_gender):
                 queue.insert(0, data)
             else: 
                 queue.append(data)
-        await bot.send_message(user_id, "🔍 Ищу собеседника... Ожидайте.")
+        await bot.send_message(user_id, "🔍 Ищу собеседника... Ожидайте.", reply_markup=get_searching_kb())
 
 async def close_chat(user_id, partner_id, initiator_id):
     active_chats.pop(user_id, None)
@@ -324,8 +343,12 @@ async def close_chat(user_id, partner_id, initiator_id):
         "⚠️ Если ваш собеседник нарушал правила чата, вы можете отправить на него жалобу."
     )
 
-    await bot.send_message(initiator_id, "Вы закончили связь с собеседником 🙄\n\n" + text_report, reply_markup=get_report_kb(partner_id if initiator_id == user_id else user_id))
-    await bot.send_message(partner_id if initiator_id == user_id else user_id, "Собеседник прервал диалог 😢\n\n" + text_report, reply_markup=get_report_kb(initiator_id))
+    await bot.send_message(initiator_id, "Вы закончили связь с собеседником 🙄\n\n" + text_report, reply_markup=get_search_menu_kb())
+    await bot.send_message(initiator_id, "Оцените собеседника:", reply_markup=get_report_kb(partner_id if initiator_id == user_id else user_id))
+
+    target_user = partner_id if initiator_id == user_id else user_id
+    await bot.send_message(target_user, "Собеседник прервал диалог 😢\n\n" + text_report, reply_markup=get_search_menu_kb())
+    await bot.send_message(target_user, "Оцените собеседника:", reply_markup=get_report_kb(initiator_id))
 
 # --- КОМАНДА СТАРТ + РЕФЕРАЛЫ ---
 @dp.message(CommandStart())
@@ -342,7 +365,7 @@ async def cmd_start(message: Message):
     if not exists and len(args) > 1 and args[1].isdigit():
         ref_id = int(args[1])
         if ref_id != user_id:
-            get_user_db(user_id) # Создаем запись нового юзера
+            get_user_db(user_id)
             update_user_db(user_id, "referrer_id", ref_id)
             change_karma(ref_id, 20)
             add_vip_days(ref_id, 1)
@@ -412,7 +435,7 @@ async def process_change_age(message: Message, state: FSMContext):
     else:
         await message.answer("Введите корректный возраст (число от 10 до 99).")
 
-# --- ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ (ИЗ СКРИНШОТА) ---
+# --- ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ ---
 @dp.message(Command("link"))
 async def cmd_link(message: Message):
     user_id = message.from_user.id
@@ -471,7 +494,7 @@ async def callback_icebreaker(callback: CallbackQuery):
     await bot.send_message(partner_id, game_msg, parse_mode="Markdown")
     await callback.answer()
 
-# --- ОБРАБОТКА ПОИСКА ---
+# --- ОБРАБОТКА ПОИСКА И УПРАВЛЕНИЯ ЧАТОМ ---
 @dp.message(F.text.in_([BTN_SEARCH_F, BTN_SEARCH_M]))
 async def search_by_gender(message: Message):
     user_id = message.from_user.id
@@ -491,6 +514,14 @@ async def search_any(message: Message):
         return
     await try_match(user_id, "ANY")
 
+@dp.message(F.text == BTN_CANCEL_SEARCH)
+async def cancel_search_handler(message: Message):
+    user_id = message.from_user.id
+    global queue
+    queue = [q for q in queue if q["user_id"] != user_id]
+    await message.answer("❌ Поиск отменен.", reply_markup=get_search_menu_kb())
+
+@dp.message(F.text == BTN_STOP_CHAT)
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message):
     user_id = message.from_user.id
@@ -501,6 +532,15 @@ async def cmd_stop(message: Message):
         await close_chat(user_id, partner_id, initiator_id=user_id)
     else:
         await message.answer("Ты сейчас ни с кем не общаешься.", reply_markup=get_search_menu_kb())
+
+@dp.message(F.text == BTN_NEXT_CHAT)
+async def next_chat_handler(message: Message):
+    user_id = message.from_user.id
+    target_gender = user_last_search_target.get(user_id, "ANY")
+    if user_id in active_chats:
+        partner_id = active_chats[user_id]
+        await close_chat(user_id, partner_id, initiator_id=user_id)
+    await try_match(user_id, target_gender)
 
 # --- РАБОТА С ПЛАТЕЖАМИ TELEGRAM STARS ---
 @dp.callback_query(F.data.startswith("buy_stars_"))
@@ -629,7 +669,6 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
 
-    # Регистрируем меню команд в UI интерфейсе Telegram
     await bot.set_my_commands([
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="profile", description="Мой профиль"),
