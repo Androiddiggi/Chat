@@ -167,14 +167,14 @@ user_last_search_target = {}
 class SettingsStates(StatesGroup):
     waiting_for_age = State()
 
-# --- КЛАВИАТУРЫ МЕНЮ ---
+# --- КЛАВИАТУРЫ ---
 BTN_SEARCH_ANY = "🚀 Поиск любого собеседника"
 BTN_SEARCH_F = "🙋‍♀️ Поиск Ж (Premium 💎)"
 BTN_SEARCH_M = "🙋‍♂️ Поиск М (Premium 💎)"
 BTN_INTERESTS = "📖 Интересы поиска"
 BTN_PROFILE = "👤 Мой профиль"
 
-# Кнопки управления состояниями
+# Кнопки смены режимов
 BTN_CANCEL_SEARCH = "❌ Отменить поиск"
 BTN_STOP_CHAT = "🛑 Остановить диалог"
 BTN_NEXT_CHAT = "⏭ Следующий собеседник"
@@ -320,11 +320,12 @@ async def try_match(user_id, target_gender):
         active_chats[user_id] = partner_id
         active_chats[partner_id] = user_id
         
-        await bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_active_chat_kb())
-        await bot.send_message(user_id, "🎲 Нажмите для старта темы разговора:", reply_markup=get_game_kb())
+        # Обновление клавиатуры на клавиатуру активного диалога
+        await bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.", reply_markup=get_active_chat_kb())
+        await bot.send_message(user_id, "🎲 Нажмите кнопку ниже для игры:", reply_markup=get_game_kb())
 
-        await bot.send_message(partner_id, "🎉 Собеседник найден! Приятного общения.\n💡 Используйте кнопку ниже, чтобы разнообразить диалог.", reply_markup=get_active_chat_kb())
-        await bot.send_message(partner_id, "🎲 Нажмите для старта темы разговора:", reply_markup=get_game_kb())
+        await bot.send_message(partner_id, "🎉 Собеседник найден! Приятного общения.", reply_markup=get_active_chat_kb())
+        await bot.send_message(partner_id, "🎲 Нажмите кнопку ниже для игры:", reply_markup=get_game_kb())
     else:
         if not any(q["user_id"] == user_id for q in queue):
             data = {"user_id": user_id, "target_gender": target_gender}
@@ -332,6 +333,7 @@ async def try_match(user_id, target_gender):
                 queue.insert(0, data)
             else: 
                 queue.append(data)
+        # Обновление клавиатуры на клавиатуру с кнопкой отмены
         await bot.send_message(user_id, "🔍 Ищу собеседника... Ожидайте.", reply_markup=get_searching_kb())
 
 async def close_chat(user_id, partner_id, initiator_id):
@@ -343,6 +345,7 @@ async def close_chat(user_id, partner_id, initiator_id):
         "⚠️ Если ваш собеседник нарушал правила чата, вы можете отправить на него жалобу."
     )
 
+    # Возврат базового меню при завершении диалога
     await bot.send_message(initiator_id, "Вы закончили связь с собеседником 🙄\n\n" + text_report, reply_markup=get_search_menu_kb())
     await bot.send_message(initiator_id, "Оцените собеседника:", reply_markup=get_report_kb(partner_id if initiator_id == user_id else user_id))
 
@@ -514,6 +517,7 @@ async def search_any(message: Message):
         return
     await try_match(user_id, "ANY")
 
+# Хэндлер кнопки "❌ Отменить поиск"
 @dp.message(F.text == BTN_CANCEL_SEARCH)
 async def cancel_search_handler(message: Message):
     user_id = message.from_user.id
@@ -521,6 +525,7 @@ async def cancel_search_handler(message: Message):
     queue = [q for q in queue if q["user_id"] != user_id]
     await message.answer("❌ Поиск отменен.", reply_markup=get_search_menu_kb())
 
+# Хэндлер кнопки "🛑 Остановить диалог" и команды /stop
 @dp.message(F.text == BTN_STOP_CHAT)
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message):
@@ -533,6 +538,7 @@ async def cmd_stop(message: Message):
     else:
         await message.answer("Ты сейчас ни с кем не общаешься.", reply_markup=get_search_menu_kb())
 
+# Хэндлер кнопки "⏭ Следующий собеседник"
 @dp.message(F.text == BTN_NEXT_CHAT)
 async def next_chat_handler(message: Message):
     user_id = message.from_user.id
