@@ -1,694 +1,1091 @@
 import asyncio
-import logging
+import json
 import os
-import random
-import sqlite3
-import time
+from pathlib import Path
+from urllib.parse import quote
 
+import aiohttp
+from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart, Command
 from aiogram.types import (
-    BotCommand,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    LabeledPrice,
     Message,
-    PreCheckoutQuery,
-    ReplyKeyboardMarkup,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 
-TOKEN = os.getenv("BOT_TOKEN", "7705314975:AAEI019teGfa2thY85w_VQlR-Lv1p3xkhsg")
+# =========================================================
+# НАСТРОЙКИ
+# =========================================================
 
-bot = Bot(token=TOKEN)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_ТОКЕН")
+
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://127.0.0.1:11434"
+)
+
+MODEL = os.getenv(
+    "OLLAMA_MODEL",
+    "qwen2.5:3b"
+)
+
+MAX_STEPS = 8
+
+MEMORY_FILE = Path("memory.json")
+
+
+# =========================================================
+# ПРОВЕРКА ТОКЕНА
+# =========================================================
+
+if BOT_TOKEN == "ВСТАВЬ_СЮДА_ТОКЕН":
+    raise RuntimeError(
+        "Вставь токен Telegram-бота в BOT_TOKEN"
+    )
+
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    )
+)
+
 dp = Dispatcher()
 
-# --- ТАРИФЫ И КОНСТАНТЫ ---
-STARS_PRICES = {"7days": 60, "1month": 120, "6months": 300, "1year": 600}
-UNBAN_PRICE = 20
 
-INTERESTS_LIST = [
-    "Ролевые игры", "Мемы", "Одиночество", "Флирт",
-    "Игры", "Музыка", "Путешествия", "Аниме",
-    "Фильмы", "Питомцы", "Книги", "Спорт"
-]
+# =========================================================
+# ПАМЯТЬ
+# =========================================================
 
-ICEBREAK_QUESTIONS = [
-    "Расскажи о своем самом неловком свидании.",
-    "Какое твое самое странное увлечение, о котором мало кто знает?",
-    "Если бы у тебя был 1 миллион долларов, на что бы ты его потратил прямо сейчас?",
-    "Какой фильм или сериал ты готов пересматривать бесконечно?",
-    "Опиши свой идеальный день от начала и до конца.",
-    "Какую суперсилу вы бы выбрали и почему?",
-    "Что тебя больше всего раздражает в людях?",
-    "Какое твое самое яркое воспоминание из детства?",
-    "Веришь ли ты в любовь с первого взгляда или это миф?",
-    "Какое самое безумное решение ты принимал в своей жизни?",
-    "Если бы ты мог изменить одно правило в мире, что бы это было?",
-    "Твой любимый способ расслабиться после тяжелого дня?",
-    "Кем ты мечтал стать в детстве и кем стал в итоге?",
-    "Какая песня у тебя сейчас на репите?",
-    "Поделись своим главным страхом."
-]
+memory = {}
 
-# --- БАЗА ДАННЫХ ---
-def init_db():
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        gender TEXT DEFAULT 'M',
-        age INTEGER DEFAULT 18,
-        interests TEXT DEFAULT '',
-        is_vip INTEGER DEFAULT 0,
-        vip_until INTEGER DEFAULT 0,
-        karma INTEGER DEFAULT 100,
-        last_daily INTEGER DEFAULT 0,
-        referrer_id INTEGER DEFAULT 0
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS ratings (
-        from_id INTEGER,
-        to_id INTEGER,
-        rating_type TEXT,
-        PRIMARY KEY (from_id, to_id)
-    )""")
-    conn.commit()
-    conn.close()
 
-def get_user_db(user_id):
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT gender, age, interests, is_vip, vip_until, karma, last_daily, referrer_id FROM users WHERE user_id = ?", (user_id,))
-    res = cur.fetchone()
-    conn.close()
-    
-    if res:
-        gender, age, interests, is_vip, vip_until, karma, last_daily, referrer_id = res
-        if is_vip == 1 and vip_until > 0 and vip_until < int(time.time()):
-            update_user_db(user_id, "is_vip", 0)
-            update_user_db(user_id, "vip_until", 0)
-            is_vip = 0
-        return gender, age, interests, is_vip, vip_until, karma, last_daily, referrer_id
-        
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-    conn.close()
-    return ('M', 18, '', 0, 0, 100, 0, 0)
+def load_memory():
 
-def update_user_db(user_id, field, value):
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute(f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id))
-    conn.commit()
-    conn.close()
+    global memory
 
-def change_karma(user_id, amount):
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET karma = karma + ? WHERE user_id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
+    if not MEMORY_FILE.exists():
+        memory = {}
+        return
 
-def get_user_stats(user_id):
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM ratings WHERE to_id = ? AND rating_type = 'like'", (user_id,))
-    likes = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM ratings WHERE to_id = ? AND rating_type = 'dislike'", (user_id,))
-    dislikes = cur.fetchone()[0]
-    conn.close()
-    return likes, dislikes
-
-def save_rating(from_id, to_id, rating_type):
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
     try:
-        cur.execute("INSERT OR REPLACE INTO ratings (from_id, to_id, rating_type) VALUES (?, ?, ?)", (from_id, to_id, rating_type))
-        conn.commit()
-    except Exception: 
-        pass
-    finally: 
-        conn.close()
 
-def add_vip_days(user_id, days):
-    _, _, _, is_vip, vip_until, _, _, _ = get_user_db(user_id)
-    now = int(time.time())
-    if is_vip == 1 and vip_until > now:
-        new_until = vip_until + (days * 86400)
-    else:
-        new_until = now + (days * 86400)
-    
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET is_vip = 1, vip_until = ? WHERE user_id = ?", (new_until, user_id))
-    conn.commit()
-    conn.close()
+        with open(
+            MEMORY_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
 
-def count_referrals(user_id):
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
-    count = cur.fetchone()[0]
-    conn.close()
-    return count
+            memory = json.load(f)
 
-# --- СТРУКТУРЫ ДАННЫХ ЧАТА ---
-queue = []
-active_chats = {}
-user_last_search_target = {}
-
-class SettingsStates(StatesGroup):
-    waiting_for_age = State()
-
-# --- КЛАВИАТУРЫ ---
-BTN_SEARCH_ANY = "🚀 Поиск любого собеседника"
-BTN_SEARCH_F = "🙋‍♀️ Поиск Ж (Premium 💎)"
-BTN_SEARCH_M = "🙋‍♂️ Поиск М (Premium 💎)"
-BTN_INTERESTS = "📖 Интересы поиска"
-BTN_PROFILE = "👤 Мой профиль"
-
-# Кнопки смены режимов
-BTN_CANCEL_SEARCH = "❌ Отменить поиск"
-BTN_STOP_CHAT = "🛑 Остановить диалог"
-BTN_NEXT_CHAT = "⏭ Следующий собеседник"
-
-def get_search_menu_kb():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=BTN_SEARCH_ANY)],
-        [KeyboardButton(text=BTN_SEARCH_F), KeyboardButton(text=BTN_SEARCH_M)],
-        [KeyboardButton(text=BTN_INTERESTS), KeyboardButton(text=BTN_PROFILE)]
-    ], resize_keyboard=True)
-
-def get_searching_kb():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=BTN_CANCEL_SEARCH)]
-    ], resize_keyboard=True)
-
-def get_active_chat_kb():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=BTN_STOP_CHAT), KeyboardButton(text=BTN_NEXT_CHAT)]
-    ], resize_keyboard=True)
-
-def get_stars_periods_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⏳ 7 дней — ⭐ {STARS_PRICES['7days']} Stars", callback_data="buy_stars_7days")],
-        [InlineKeyboardButton(text=f"📅 1 месяц — ⭐ {STARS_PRICES['1month']} Stars", callback_data="buy_stars_1month")],
-        [InlineKeyboardButton(text=f"📦 6 месяцев — ⭐ {STARS_PRICES['6months']} Stars", callback_data="buy_stars_6months")],
-        [InlineKeyboardButton(text=f"👑 1 год — ⭐ {STARS_PRICES['1year']} Stars", callback_data="buy_stars_1year")]
-    ])
-
-def get_report_kb(target_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍 Лайк", callback_data=f"rate_like_{target_id}"),
-            InlineKeyboardButton(text="👎 Дизлайк", callback_data=f"rate_dislike_{target_id}")
-        ],
-        [InlineKeyboardButton(text="📰 Спам и реклама", callback_data=f"report_spam_{target_id}")],
-        [InlineKeyboardButton(text="❌ Пошлый собеседник", callback_data=f"report_nsfw_{target_id}")],
-        [InlineKeyboardButton(text="🔞 Несовершеннолетний", callback_data=f"report_minor_{target_id}")],
-        [InlineKeyboardButton(text="⚠️ Другая жалоба →", callback_data=f"report_other_{target_id}")]
-    ])
-
-def get_profile_inline_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Сменить пол", callback_data="toggle_gender"), InlineKeyboardButton(text="🔢 Изменить возраст", callback_data="change_age")],
-        [InlineKeyboardButton(text="🔗 Реферальная система", callback_data="open_refs"), InlineKeyboardButton(text="💎 Купить VIP", callback_data="open_vip_menu")]
-    ])
-
-def get_game_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Задать случайный вопрос", callback_data="play_icebreaker")]
-    ])
-
-def get_unban_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⚡ Мгновенный разбан — ⭐ {UNBAN_PRICE} Stars", callback_data="buy_unban")]
-    ])
-
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ПРОФИЛЯ ---
-async def send_or_edit_profile(user_id: int, event):
-    gender, age, _, is_vip, vip_until, karma, last_daily, _ = get_user_db(user_id)
-    likes, dislikes = get_user_stats(user_id)
-    
-    now = int(time.time())
-    daily_bonus_applied = False
-    if now - last_daily >= 86400:
-        change_karma(user_id, 2)
-        update_user_db(user_id, "last_daily", now)
-        karma += 2
-        daily_bonus_applied = True
-
-    g_text = "👨 Мужской" if gender == "M" else "👩 Женский"
-    
-    if is_vip:
-        time_left = vip_until - now
-        days_left = max(1, round(time_left / 86400))
-        v_text = f"💎 Premium (осталось {days_left} дн.)"
-    else:
-        v_text = "Обычный пользователь"
-        
-    profile_text = (
-        f"👤 *Ваш профиль:*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📝 *Пол:* {g_text}\n"
-        f"🔢 *Возраст:* {age} лет\n"
-        f"👑 *Статус:* {v_text}\n\n"
-        f"📊 *Статистика отзывов:*\n"
-        f"🔋 *Общая Карма:* {karma}\n"
-        f"👍 *Лайков:* {likes} | 👎 *Дизлайков:* {dislikes}\n"
-    )
-    if daily_bonus_applied:
-        profile_text += "\n🎁 *Вам начислена ежедневная награда: +2 к Карме!*"
-
-    if isinstance(event, Message):
-        await event.answer(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
-    elif isinstance(event, CallbackQuery):
-        await event.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=get_profile_inline_kb())
-
-# --- ЛОГИКА ПОИСКА ПАРТНЕРОВ ---
-async def try_match(user_id, target_gender):
-    _, _, interests, is_vip, _, karma, _, _ = get_user_db(user_id)
-    
-    if karma < 20:
-        await bot.send_message(
-            user_id, 
-            "⚠️ *Вы заблокированы!*\nВаша карма опустилась ниже допустимого уровня (20) из-за жалоб пользователей.\n\n"
-            "Вы можете дождаться амнистии или разблокировать аккаунт прямо сейчас.",
-            parse_mode="Markdown", reply_markup=get_unban_kb()
-        )
-        return
-
-    user_last_search_target[user_id] = target_gender
-    u_ints = set(interests.split(",")) if interests else set()
-    partner_id = None
-    
-    for peer in queue:
-        p_id = peer["user_id"]
-        p_target_gender = peer["target_gender"]
-        if p_id == user_id: 
-            continue
-            
-        _, p_age, p_interests, p_vip, _, p_karma, _, _ = get_user_db(p_id)
-        p_ints = set(p_interests.split(",")) if p_interests else set()
-
-        u_gen, _, _, _, _, _, _, _ = get_user_db(user_id)
-        p_gen, _, _, _, _, _, _, _ = get_user_db(p_id)
-        
-        if target_gender != "ANY" and target_gender != p_gen: 
-            continue
-        if p_target_gender != "ANY" and p_target_gender != u_gen: 
-            continue
-
-        interests_match = True
-        if u_ints or p_ints:
-            if not u_ints.intersection(p_ints): 
-                interests_match = False
-
-        if interests_match:
-            partner_id = p_id
-            queue.remove(peer)
-            break
-
-    if partner_id:
-        active_chats[user_id] = partner_id
-        active_chats[partner_id] = user_id
-        
-        # Обновление клавиатуры на клавиатуру активного диалога
-        await bot.send_message(user_id, "🎉 Собеседник найден! Приятного общения.", reply_markup=get_active_chat_kb())
-        await bot.send_message(user_id, "🎲 Нажмите кнопку ниже для игры:", reply_markup=get_game_kb())
-
-        await bot.send_message(partner_id, "🎉 Собеседник найден! Приятного общения.", reply_markup=get_active_chat_kb())
-        await bot.send_message(partner_id, "🎲 Нажмите кнопку ниже для игры:", reply_markup=get_game_kb())
-    else:
-        if not any(q["user_id"] == user_id for q in queue):
-            data = {"user_id": user_id, "target_gender": target_gender}
-            if is_vip: 
-                queue.insert(0, data)
-            else: 
-                queue.append(data)
-        # Обновление клавиатуры на клавиатуру с кнопкой отмены
-        await bot.send_message(user_id, "🔍 Ищу собеседника... Ожидайте.", reply_markup=get_searching_kb())
-
-async def close_chat(user_id, partner_id, initiator_id):
-    active_chats.pop(user_id, None)
-    active_chats.pop(partner_id, None)
-    
-    text_report = (
-        "Если хотите, оставьте мнение о вашем собеседнике.\n\n"
-        "⚠️ Если ваш собеседник нарушал правила чата, вы можете отправить на него жалобу."
-    )
-
-    # Возврат базового меню при завершении диалога
-    await bot.send_message(initiator_id, "Вы закончили связь с собеседником 🙄\n\n" + text_report, reply_markup=get_search_menu_kb())
-    await bot.send_message(initiator_id, "Оцените собеседника:", reply_markup=get_report_kb(partner_id if initiator_id == user_id else user_id))
-
-    target_user = partner_id if initiator_id == user_id else user_id
-    await bot.send_message(target_user, "Собеседник прервал диалог 😢\n\n" + text_report, reply_markup=get_search_menu_kb())
-    await bot.send_message(target_user, "Оцените собеседника:", reply_markup=get_report_kb(initiator_id))
-
-# --- КОМАНДА СТАРТ + РЕФЕРАЛЫ ---
-@dp.message(CommandStart())
-async def cmd_start(message: Message):
-    user_id = message.from_user.id
-    args = message.text.split()
-    
-    conn = sqlite3.connect("anon_ultimate_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    exists = cur.fetchone()
-    conn.close()
-    
-    if not exists and len(args) > 1 and args[1].isdigit():
-        ref_id = int(args[1])
-        if ref_id != user_id:
-            get_user_db(user_id)
-            update_user_db(user_id, "referrer_id", ref_id)
-            change_karma(ref_id, 20)
-            add_vip_days(ref_id, 1)
-            try:
-                await bot.send_message(ref_id, "🎉 По вашей ссылке зарегистрировался новый пользователь!\n🎁 Вам начислено: *+20 Кармы* и *1 день VIP*!", parse_mode="Markdown")
-            except Exception: 
-                pass
-
-    get_user_db(user_id)
-    await message.answer("👋 Добро пожаловать в анонимный чат!\n\nИспользуйте меню для поиска собеседников.", reply_markup=get_search_menu_kb())
-
-# --- ОТОБРАЖЕНИЕ И УПРАВЛЕНИЕ ПРОФИЛЕМ ---
-@dp.message(F.text == BTN_PROFILE)
-@dp.message(Command("profile"))
-@dp.message(Command("settings"))
-async def cmd_profile(message: Message):
-    await send_or_edit_profile(message.from_user.id, message)
-
-@dp.callback_query(F.data == "toggle_gender")
-async def inline_toggle_gender(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    gender, _, _, _, _, _, _, _ = get_user_db(user_id)
-    update_user_db(user_id, "gender", "F" if gender == "M" else "M")
-    await callback.answer("Пол изменен!")
-    await send_or_edit_profile(user_id, callback)
-
-@dp.callback_query(F.data == "open_refs")
-async def callback_open_refs(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
-    ref_count = count_referrals(user_id)
-    
-    text = (
-        f"🔗 *Ваша реферальная ссылка:*\n`{ref_link}`\n\n"
-        f"👥 Приглашено друзей: *{ref_count}*\n\n"
-        f"🎁 За каждого приглашенного друга вы получаете:\n"
-        f"• *+20 к Карме*\n"
-        f"• *1 день VIP-статуса бесплатно!*"
-    )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в профиль", callback_data="back_to_profile")]]))
-    await callback.answer()
-
-@dp.callback_query(F.data == "open_vip_menu")
-@dp.callback_query(F.data == "back_to_periods")
-async def callback_vip_menu(callback: CallbackQuery):
-    await callback.message.edit_text("👑 *Покупка Premium доступа за Telegram Stars:*\n\nВыберите нужный период подписки:", parse_mode="Markdown", reply_markup=get_stars_periods_kb())
-    await callback.answer()
-
-@dp.callback_query(F.data == "back_to_profile")
-async def callback_back_profile(callback: CallbackQuery):
-    await send_or_edit_profile(callback.from_user.id, callback)
-    await callback.answer()
-
-@dp.callback_query(F.data == "change_age")
-async def inline_change_age(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("Введите ваш новый возраст (числом):")
-    await state.set_state(SettingsStates.waiting_for_age)
-
-@dp.message(SettingsStates.waiting_for_age)
-async def process_change_age(message: Message, state: FSMContext):
-    if message.text.isdigit() and 10 <= int(message.text) <= 99:
-        update_user_db(message.from_user.id, "age", int(message.text))
-        await state.clear()
-        await message.answer("✅ Возраст изменен!", reply_markup=get_search_menu_kb())
-    else:
-        await message.answer("Введите корректный возраст (число от 10 до 99).")
-
-# --- ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ ---
-@dp.message(Command("link"))
-async def cmd_link(message: Message):
-    user_id = message.from_user.id
-    bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
-    ref_count = count_referrals(user_id)
-    await message.answer(
-        f"🔗 *Ваша реферальная ссылка:*\n`{ref_link}`\n\n"
-        f"👥 Приглашено друзей: *{ref_count}*\n\n"
-        f"🎁 За каждого друга: *+20 Кармы* и *1 день VIP*!",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("rules"))
-async def cmd_rules(message: Message):
-    rules_text = (
-        "📜 *Правила общения в анонимном чате:*\n\n"
-        "1. Запрещена реклама, спам и коммерция.\n"
-        "2. Запрещен оскорбительный контент, шантаж и домогательства.\n"
-        "3. Запрещено распространение материалов 18+ и контента с несовершеннолетними.\n\n"
-        "⚠️ При падении кармы ниже 20 ваш аккаунт блокируется автоматически."
-    )
-    await message.answer(rules_text, parse_mode="Markdown")
-
-@dp.message(Command("myid"))
-async def cmd_myid(message: Message):
-    await message.answer(f"🆔 Ваш Telegram ID: `{message.from_user.id}`", parse_mode="Markdown")
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    help_text = (
-        "⚙️ *Доступные команды:*\n\n"
-        "• /start — Запустить бота и открыть главное меню\n"
-        "• /profile — Посмотреть и изменить профиль\n"
-        "• /interests — Настройка интересов для поиска\n"
-        "• /link — Ваша реферальная ссылка\n"
-        "• /rules — Правила бота\n"
-        "• /myid — Узнать свой Telegram ID\n"
-        "• /stop — Завершить текущий диалог или выйти из поиска"
-    )
-    await message.answer(help_text, parse_mode="Markdown")
-
-# --- ИГРА ВНУТРИ ЧАТА ---
-@dp.callback_query(F.data == "play_icebreaker")
-async def callback_icebreaker(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id not in active_chats:
-        await callback.answer("Вы не в активном диалоге.", show_alert=True)
-        return
-        
-    partner_id = active_chats[user_id]
-    question = random.choice(ICEBREAK_QUESTIONS)
-    game_msg = f"🎲 *Игра «Разговорный ледокол»*\n━━━━━━━━━━━━━━━━━━━━\nВопрос для обсуждения:\n\n_\"{question}\"_"
-    
-    await bot.send_message(user_id, game_msg, parse_mode="Markdown")
-    await bot.send_message(partner_id, game_msg, parse_mode="Markdown")
-    await callback.answer()
-
-# --- ОБРАБОТКА ПОИСКА И УПРАВЛЕНИЯ ЧАТОМ ---
-@dp.message(F.text.in_([BTN_SEARCH_F, BTN_SEARCH_M]))
-async def search_by_gender(message: Message):
-    user_id = message.from_user.id
-    _, _, _, is_vip, _, _, _, _ = get_user_db(user_id)
-    if not is_vip:
-        await message.answer("⚠️ *Поиск по полу доступен только Premium пользователям!*", parse_mode="Markdown", reply_markup=get_stars_periods_kb())
-        return
-    if user_id in active_chats: 
-        return
-    target = "F" if message.text == BTN_SEARCH_F else "M"
-    await try_match(user_id, target)
-
-@dp.message(F.text == BTN_SEARCH_ANY)
-async def search_any(message: Message):
-    user_id = message.from_user.id
-    if user_id in active_chats: 
-        return
-    await try_match(user_id, "ANY")
-
-# Хэндлер кнопки "❌ Отменить поиск"
-@dp.message(F.text == BTN_CANCEL_SEARCH)
-async def cancel_search_handler(message: Message):
-    user_id = message.from_user.id
-    global queue
-    queue = [q for q in queue if q["user_id"] != user_id]
-    await message.answer("❌ Поиск отменен.", reply_markup=get_search_menu_kb())
-
-# Хэндлер кнопки "🛑 Остановить диалог" и команды /stop
-@dp.message(F.text == BTN_STOP_CHAT)
-@dp.message(Command("stop"))
-async def cmd_stop(message: Message):
-    user_id = message.from_user.id
-    global queue
-    queue = [q for q in queue if q["user_id"] != user_id]
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
-        await close_chat(user_id, partner_id, initiator_id=user_id)
-    else:
-        await message.answer("Ты сейчас ни с кем не общаешься.", reply_markup=get_search_menu_kb())
-
-# Хэндлер кнопки "⏭ Следующий собеседник"
-@dp.message(F.text == BTN_NEXT_CHAT)
-async def next_chat_handler(message: Message):
-    user_id = message.from_user.id
-    target_gender = user_last_search_target.get(user_id, "ANY")
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
-        await close_chat(user_id, partner_id, initiator_id=user_id)
-    await try_match(user_id, target_gender)
-
-# --- РАБОТА С ПЛАТЕЖАМИ TELEGRAM STARS ---
-@dp.callback_query(F.data.startswith("buy_stars_"))
-async def process_stars_invoice(callback: CallbackQuery):
-    await callback.answer()
-    period = callback.data.split("buy_stars_")[1]
-    stars_amount = STARS_PRICES[period]
-    ru_names = {"7days": "7 дней", "1month": "1 месяц", "6months": "6 месяцев", "1year": "1 год"}
-    
-    await callback.message.answer_invoice(
-        title=f"VIP Premium ({ru_names[period]})",
-        description=f"Активация VIP-доступа на {ru_names[period]} за Telegram Stars.",
-        payload=f"vip_stars_{period}",
-        provider_token="", currency="XTR",
-        prices=[LabeledPrice(label=f"Premium {ru_names[period]}", amount=stars_amount)]
-    )
-
-@dp.callback_query(F.data == "buy_unban")
-async def process_unban_invoice(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer_invoice(
-        title="Мгновенная разблокировка аккаунта",
-        description="Сброс штрафной кармы до базовых 100 единиц и допуск ко всем поискам.",
-        payload="unban_stars",
-        provider_token="", currency="XTR",
-        prices=[LabeledPrice(label="Снятие блокировки", amount=UNBAN_PRICE)]
-    )
-
-@dp.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-@dp.message(F.successful_payment)
-async def process_successful_payment(message: Message):
-    user_id = message.from_user.id
-    payload = message.successful_payment.invoice_payload
-    
-    if "vip_stars_" in payload:
-        period = payload.split("vip_stars_")[1]
-        days = {"7days": 7, "1month": 30, "6months": 180, "1year": 365}[period]
-        add_vip_days(user_id, days)
-        await message.answer("🎉 *VIP-статус успешно активирован!*", parse_mode="Markdown", reply_markup=get_search_menu_kb())
-        
-    elif payload == "unban_stars":
-        update_user_db(user_id, "karma", 100)
-        await message.answer("⚡ *Ваш аккаунт успешно разблокирован!* Ваша карма восстановлена до 100.", parse_mode="Markdown", reply_markup=get_search_menu_kb())
-
-# --- ОЦЕНКИ И ЖАЛОБЫ ---
-@dp.callback_query(F.data.startswith("rate_"))
-async def process_rating(callback: CallbackQuery):
-    data_parts = callback.data.split("_")
-    action, target_id = data_parts[1], int(data_parts[2])
-    save_rating(callback.from_user.id, target_id, action)
-    change_karma(target_id, 1 if action == "like" else -1)
-    await callback.answer("Оценка учтена!")
-    await callback.message.edit_text(text=callback.message.text + f"\n\n✅ *Вы поставили: {'Лайк 👍' if action == 'like' else 'Дизлайк 👎'}*", parse_mode="Markdown", reply_markup=None)
-
-@dp.callback_query(F.data.startswith("report_"))
-async def process_reporting(callback: CallbackQuery):
-    data_parts = callback.data.split("_")
-    reason, target_id = data_parts[1], int(data_parts[2])
-    penalty = {"spam": -10, "nsfw": -15, "minor": -25, "other": -5}[reason]
-    change_karma(target_id, penalty)
-    await callback.answer("Жалоба отправлена!", show_alert=True)
-    await callback.message.edit_text(text=callback.message.text + f"\n\n✅ *Отправлена жалоба на собеседника.*", parse_mode="Markdown", reply_markup=None)
-
-# --- ИНТЕРЕСЫ И ТЕГИ ---
-def build_interests_keyboard(user_interests_str):
-    active_set = set(user_interests_str.split(",")) if user_interests_str else set()
-    buttons = []
-    for i in range(0, len(INTERESTS_LIST), 2):
-        row = []
-        for j in range(2):
-            if i + j < len(INTERESTS_LIST):
-                item = INTERESTS_LIST[i + j]
-                row.append(InlineKeyboardButton(text=f"✅ {item}" if item in active_set else item, callback_data=f"tag_toggle_{item}"))
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="❌ Сбросить", callback_data="tag_reset")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-@dp.message(F.text == BTN_INTERESTS)
-@dp.message(Command("interests"))
-async def cmd_interests(message: Message):
-    _, _, interests, _, _, _, _, _ = get_user_db(message.from_user.id)
-    await message.answer("Выберите ваши интересы для точного поиска:", reply_markup=build_interests_keyboard(interests))
-
-@dp.callback_query(F.data.startswith("tag_toggle_"))
-async def callback_tag_toggle(callback: CallbackQuery):
-    item = callback.data.split("tag_toggle_")[1]
-    _, _, interests, _, _, _, _, _ = get_user_db(callback.from_user.id)
-    active_set = set(interests.split(",")) if interests else set()
-    if item in active_set: 
-        active_set.remove(item)
-    else: 
-        active_set.add(item)
-    update_user_db(callback.from_user.id, "interests", ",".join(filter(None, active_set)))
-    await callback.message.edit_reply_markup(reply_markup=build_interests_keyboard(",".join(filter(None, active_set))))
-    await callback.answer()
-
-@dp.callback_query(F.data == "tag_reset")
-async def callback_tag_reset(callback: CallbackQuery):
-    update_user_db(callback.from_user.id, "interests", "")
-    await callback.message.edit_reply_markup(reply_markup=build_interests_keyboard(""))
-    await callback.answer("Сброшено")
-
-# --- ЧАТ-РОУТЕР ---
-@dp.message()
-async def chat_router(message: Message):
-    user_id = message.from_user.id
-    
-    if message.text and message.text.startswith("/"):
-        return
-
-    if user_id not in active_chats:
-        await message.answer("Вы не находитесь в чате. Нажмите кнопку поиска.", reply_markup=get_search_menu_kb())
-        return
-        
-    partner_id = active_chats[user_id]
-    try:
-        await message.send_copy(chat_id=partner_id)
     except Exception:
-        await message.answer("⚠️ Сообщение не доставлено. Возможно, собеседник вышел.")
 
-# --- ЗАПУСК ---
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    init_db()
+        memory = {}
 
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Запустить бота"),
-        BotCommand(command="profile", description="Мой профиль"),
-        BotCommand(command="interests", description="Настройка интересов"),
-        BotCommand(command="link", description="Реферальная ссылка"),
-        BotCommand(command="settings", description="Настройки профиля"),
-        BotCommand(command="rules", description="Правила чата"),
-        BotCommand(command="myid", description="Мой Telegram ID"),
-        BotCommand(command="help", description="Помощь по командам"),
-        BotCommand(command="stop", description="Остановить поиск / диалог")
+
+def save_memory():
+
+    try:
+
+        with open(
+            MEMORY_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                memory,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    except Exception as e:
+
+        print(
+            "Ошибка сохранения памяти:",
+            e
+        )
+
+
+def add_memory(
+    user_id,
+    role,
+    text
+):
+
+    uid = str(user_id)
+
+    if uid not in memory:
+        memory[uid] = []
+
+    memory[uid].append({
+        "role": role,
+        "content": text
+    })
+
+    # Храним последние 40 сообщений
+    memory[uid] = memory[uid][-40:]
+
+    save_memory()
+
+
+def get_memory(user_id):
+
+    return memory.get(
+        str(user_id),
+        []
+    )
+
+
+# =========================================================
+# СОСТОЯНИЯ
+# =========================================================
+
+user_mode = {}
+
+running_tasks = {}
+
+
+# =========================================================
+# КЛАВИАТУРА
+# =========================================================
+
+def keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+
+            [
+                InlineKeyboardButton(
+                    text="💬 Чат",
+                    callback_data="chat"
+                ),
+
+                InlineKeyboardButton(
+                    text="🧠 Автономный режим",
+                    callback_data="auto"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    text="🌐 Интернет",
+                    callback_data="web"
+                ),
+
+                InlineKeyboardButton(
+                    text="📚 Память",
+                    callback_data="memory"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    text="📊 Статус",
+                    callback_data="status"
+                ),
+
+                InlineKeyboardButton(
+                    text="⛔ Стоп",
+                    callback_data="stop"
+                )
+            ]
+
+        ]
+    )
+
+
+# =========================================================
+# OLLAMA
+# =========================================================
+
+async def ask_ai(
+    messages
+):
+
+    url = (
+        OLLAMA_URL
+        + "/api/chat"
+    )
+
+    data = {
+        "model": MODEL,
+        "messages": messages,
+        "stream": False
+    }
+
+    timeout = aiohttp.ClientTimeout(
+        total=600
+    )
+
+    async with aiohttp.ClientSession(
+        timeout=timeout
+    ) as session:
+
+        async with session.post(
+            url,
+            json=data
+        ) as response:
+
+            if response.status != 200:
+
+                error = await response.text()
+
+                raise RuntimeError(
+                    f"Ollama ошибка "
+                    f"{response.status}: "
+                    f"{error[:500]}"
+                )
+
+            result = await response.json()
+
+            return result[
+                "message"
+            ][
+                "content"
+            ]
+
+
+# =========================================================
+# SYSTEM PROMPT
+# =========================================================
+
+SYSTEM = """
+Ты — автономный локальный AI.
+
+Ты работаешь внутри Telegram-бота.
+
+Твои возможности:
+
+1. Общение с пользователем.
+2. Анализ информации.
+3. Интернет-поиск через специальный инструмент.
+4. Долговременная память.
+5. Планирование задач.
+6. Автономное исследование.
+
+В автономном режиме:
+
+- разбивай большую задачу на маленькие шаги;
+- проверяй информацию;
+- используй интернет, когда это необходимо;
+- анализируй найденную информацию;
+- сохраняй полезные результаты в память.
+
+Не придумывай результаты поиска.
+
+Не утверждай, что выполнил действие,
+если оно фактически не выполнялось.
+
+Не пытайся получить пароли,
+токены или секретные данные.
+
+Не выполняй опасные действия.
+"""
+
+
+# =========================================================
+# INTERNET SEARCH
+# =========================================================
+
+async def search_web(
+    query
+):
+
+    url = (
+        "https://html.duckduckgo.com/html/?q="
+        + quote(query)
+    )
+
+    headers = {
+        "User-Agent":
+        "Mozilla/5.0"
+    }
+
+    timeout = aiohttp.ClientTimeout(
+        total=30
+    )
+
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        headers=headers
+    ) as session:
+
+        async with session.get(
+            url
+        ) as response:
+
+            if response.status != 200:
+
+                return []
+
+            html = await response.text()
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    results = []
+
+    for result in soup.select(
+        ".result"
+    )[:5]:
+
+        title = result.select_one(
+            ".result__a"
+        )
+
+        description = result.select_one(
+            ".result__snippet"
+        )
+
+        if not title:
+            continue
+
+        results.append({
+            "title":
+                title.get_text(
+                    " ",
+                    strip=True
+                ),
+
+            "url":
+                title.get(
+                    "href",
+                    ""
+                ),
+
+            "description":
+                (
+                    description.get_text(
+                        " ",
+                        strip=True
+                    )
+                    if description
+                    else ""
+                )
+        })
+
+    return results
+
+
+# =========================================================
+# ПОИСК + AI
+# =========================================================
+
+async def internet_answer(
+    user_id,
+    query
+):
+
+    results = await search_web(
+        query
+    )
+
+    if not results:
+
+        return (
+            "🌐 Ничего не найдено."
+        )
+
+    text = ""
+
+    for i, item in enumerate(
+        results,
+        1
+    ):
+
+        text += (
+            f"\n{i}. {item['title']}\n"
+            f"{item['url']}\n"
+            f"{item['description']}\n"
+        )
+
+    prompt = f"""
+Пользователь попросил найти:
+
+{query}
+
+Вот результаты поиска:
+
+{text}
+
+Проанализируй результаты и дай
+пользователю понятный ответ.
+
+Не придумывай информацию,
+которой нет в результатах.
+"""
+
+    answer = await ask_ai([
+        {
+            "role": "system",
+            "content": SYSTEM
+        },
+
+        {
+            "role": "user",
+            "content": prompt
+        }
     ])
 
-    print("Бот успешно запущен!")
-    await dp.start_polling(bot)
+    add_memory(
+        user_id,
+        "user",
+        "Поиск: " + query
+    )
+
+    add_memory(
+        user_id,
+        "assistant",
+        answer
+    )
+
+    return answer
+
+
+# =========================================================
+# /START
+# =========================================================
+
+@dp.message(
+    CommandStart()
+)
+async def start(
+    message: Message
+):
+
+    await message.answer(
+        "🤖 <b>Local AI</b>\n\n"
+        "Я готов к работе.\n\n"
+        "Выбери режим:",
+        reply_markup=keyboard()
+    )
+
+
+# =========================================================
+# /HELP
+# =========================================================
+
+@dp.message(
+    Command("help")
+)
+async def help_command(
+    message: Message
+):
+
+    await message.answer(
+        "🤖 <b>Local AI</b>\n\n"
+
+        "💬 <b>Чат</b> — обычное общение.\n"
+        "🧠 <b>Автономный режим</b> — "
+        "ИИ получает цель и самостоятельно "
+        "разбирает её.\n"
+        "🌐 <b>Интернет</b> — поиск информации.\n"
+        "📚 <b>Память</b> — сохранённая история.\n"
+        "📊 <b>Статус</b> — состояние системы.\n"
+        "⛔ <b>Стоп</b> — остановить автономную задачу."
+    )
+
+
+# =========================================================
+# КНОПКА ЧАТ
+# =========================================================
+
+@dp.callback_query(
+    F.data == "chat"
+)
+async def chat_button(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    user_mode[
+        callback.from_user.id
+    ] = "chat"
+
+    await callback.message.answer(
+        "💬 <b>Чат включён.</b>\n\n"
+        "Напиши сообщение."
+    )
+
+
+# =========================================================
+# КНОПКА ИНТЕРНЕТ
+# =========================================================
+
+@dp.callback_query(
+    F.data == "web"
+)
+async def web_button(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    user_mode[
+        callback.from_user.id
+    ] = "web"
+
+    await callback.message.answer(
+        "🌐 <b>Режим поиска.</b>\n\n"
+        "Напиши, что мне найти."
+    )
+
+
+# =========================================================
+# КНОПКА АВТОНОМНОГО РЕЖИМА
+# =========================================================
+
+@dp.callback_query(
+    F.data == "auto"
+)
+async def auto_button(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    user_mode[
+        callback.from_user.id
+    ] = "auto"
+
+    await callback.message.answer(
+        "🧠 <b>Автономный режим.</b>\n\n"
+        "Напиши цель.\n\n"
+        "Например:\n"
+        "<code>Изучи Python и "
+        "составь программу обучения.</code>"
+    )
+
+
+# =========================================================
+# ПАМЯТЬ
+# =========================================================
+
+@dp.callback_query(
+    F.data == "memory"
+)
+async def memory_button(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    history = get_memory(
+        callback.from_user.id
+    )
+
+    if not history:
+
+        await callback.message.answer(
+            "📚 Память пока пустая."
+        )
+
+        return
+
+    result = (
+        "📚 <b>Последние записи:</b>\n\n"
+    )
+
+    for item in history[-10:]:
+
+        role = (
+            "Ты"
+            if item["role"] == "user"
+            else "ИИ"
+        )
+
+        text = item[
+            "content"
+        ]
+
+        if len(text) > 500:
+            text = text[:500] + "..."
+
+        result += (
+            f"<b>{role}:</b>\n"
+            f"{text}\n\n"
+        )
+
+    await callback.message.answer(
+        result
+    )
+
+
+# =========================================================
+# STATUS
+# =========================================================
+
+@dp.callback_query(
+    F.data == "status"
+)
+async def status_button(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    running = (
+        callback.from_user.id
+        in running_tasks
+    )
+
+    await callback.message.answer(
+        "📊 <b>Статус</b>\n\n"
+        f"Модель: <code>{MODEL}</code>\n"
+        f"Ollama: <code>{OLLAMA_URL}</code>\n"
+        f"Автономный режим: "
+        f"{'🟢 работает' if running else '⚪ выключен'}"
+    )
+
+
+# =========================================================
+# STOP
+# =========================================================
+
+@dp.callback_query(
+    F.data == "stop"
+)
+async def stop_button(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    user_id = callback.from_user.id
+
+    task = running_tasks.get(
+        user_id
+    )
+
+    if task:
+
+        task.cancel()
+
+        running_tasks.pop(
+            user_id,
+            None
+        )
+
+        await callback.message.answer(
+            "⛔ Автономная задача остановлена."
+        )
+
+    else:
+
+        await callback.message.answer(
+            "ℹ️ Автономных задач нет."
+        )
+
+
+# =========================================================
+# АВТОНОМНЫЙ AI
+# =========================================================
+
+async def autonomous(
+    message: Message,
+    goal: str
+):
+
+    user_id = message.from_user.id
+
+    context = ""
+
+    try:
+
+        await message.answer(
+            "🧠 <b>Автономный режим запущен.</b>\n\n"
+            f"Цель:\n{goal}"
+        )
+
+        for step in range(
+            1,
+            MAX_STEPS + 1
+        ):
+
+            prompt = f"""
+Твоя задача:
+
+{goal}
+
+Текущий шаг:
+
+{step}
+
+Предыдущий результат:
+
+{context}
+
+Реши, что делать дальше.
+
+Если нужна информация из интернета:
+
+ACTION: SEARCH
+QUERY: запрос
+
+Если нужно проанализировать уже
+полученную информацию:
+
+ACTION: ANALYZE
+TEXT: текст
+
+Если задача закончена:
+
+ACTION: FINISH
+TEXT: итоговый ответ
+"""
+
+            decision = await ask_ai([
+                {
+                    "role":
+                        "system",
+                    "content":
+                        SYSTEM
+                },
+
+                {
+                    "role":
+                        "user",
+                    "content":
+                        prompt
+                }
+            ])
+
+            # -----------------------------
+            # SEARCH
+            # -----------------------------
+
+            if "ACTION: SEARCH" in decision:
+
+                query = ""
+
+                if "QUERY:" in decision:
+
+                    query = decision.split(
+                        "QUERY:",
+                        1
+                    )[1].strip()
+
+                if not query:
+                    query = goal
+
+                await message.answer(
+                    f"🔎 <b>Шаг {step}</b>\n\n"
+                    f"Ищу:\n{query}"
+                )
+
+                results = await search_web(
+                    query
+                )
+
+                context = json.dumps(
+                    results,
+                    ensure_ascii=False
+                )
+
+            # -----------------------------
+            # ANALYZE
+            # -----------------------------
+
+            elif "ACTION: ANALYZE" in decision:
+
+                analysis = await ask_ai([
+                    {
+                        "role":
+                            "system",
+                        "content":
+                            SYSTEM
+                    },
+
+                    {
+                        "role":
+                            "user",
+                        "content":
+                            f"""
+Проанализируй:
+
+{context}
+"""
+                    }
+                ])
+
+                context = analysis
+
+                await message.answer(
+                    f"🧠 <b>Шаг {step}</b>\n\n"
+                    f"{analysis[:3500]}"
+                )
+
+                add_memory(
+                    user_id,
+                    "assistant",
+                    analysis
+                )
+
+            # -----------------------------
+            # FINISH
+            # -----------------------------
+
+            elif "ACTION: FINISH" in decision:
+
+                if "TEXT:" in decision:
+
+                    result = decision.split(
+                        "TEXT:",
+                        1
+                    )[1].strip()
+
+                else:
+
+                    result = decision
+
+                await message.answer(
+                    "✅ <b>Задача завершена.</b>\n\n"
+                    f"{result[:4000]}"
+                )
+
+                add_memory(
+                    user_id,
+                    "autonomous",
+                    result
+                )
+
+                return
+
+            else:
+
+                context = decision
+
+            await asyncio.sleep(1)
+
+        await message.answer(
+            "ℹ️ Достигнут максимальный "
+            f"лимит шагов: {MAX_STEPS}"
+        )
+
+    except asyncio.CancelledError:
+
+        await message.answer(
+            "⛔ Автономный режим остановлен."
+        )
+
+    except Exception as e:
+
+        await message.answer(
+            "❌ Ошибка:\n"
+            f"<code>{str(e)[:1000]}</code>"
+        )
+
+    finally:
+
+        running_tasks.pop(
+            user_id,
+            None
+        )
+
+        user_mode.pop(
+            user_id,
+            None
+        )
+
+
+# =========================================================
+# ОБРАБОТКА ТЕКСТА
+# =========================================================
+
+@dp.message(
+    F.text
+)
+async def text_handler(
+    message: Message
+):
+
+    text = message.text.strip()
+
+    user_id = message.from_user.id
+
+    mode = user_mode.get(
+        user_id,
+        "chat"
+    )
+
+    # =====================================================
+    # АВТОНОМНЫЙ РЕЖИМ
+    # =====================================================
+
+    if mode == "auto":
+
+        if user_id in running_tasks:
+
+            await message.answer(
+                "⚠️ У тебя уже выполняется задача."
+            )
+
+            return
+
+        task = asyncio.create_task(
+            autonomous(
+                message,
+                text
+            )
+        )
+
+        running_tasks[
+            user_id
+        ] = task
+
+        return
+
+    # =====================================================
+    # ИНТЕРНЕТ
+    # =====================================================
+
+    if mode == "web":
+
+        await message.answer(
+            "🔎 Ищу..."
+        )
+
+        try:
+
+            answer = await internet_answer(
+                user_id,
+                text
+            )
+
+            await message.answer(
+                answer[:4000]
+            )
+
+        except Exception as e:
+
+            await message.answer(
+                "❌ Ошибка поиска:\n"
+                f"<code>{str(e)[:1000]}</code>"
+            )
+
+        user_mode.pop(
+            user_id,
+            None
+        )
+
+        return
+
+    # =====================================================
+    # ОБЫЧНЫЙ ЧАТ
+    # =====================================================
+
+    add_memory(
+        user_id,
+        "user",
+        text
+    )
+
+    history = get_memory(
+        user_id
+    )
+
+    messages = [
+        {
+            "role":
+                "system",
+            "content":
+                SYSTEM
+        }
+    ]
+
+    messages.extend(
+        history[-25:]
+    )
+
+    await message.bot.send_chat_action(
+        message.chat.id,
+        "typing"
+    )
+
+    try:
+
+        answer = await ask_ai(
+            messages
+        )
+
+        add_memory(
+            user_id,
+            "assistant",
+            answer
+        )
+
+        # Разбиваем длинные ответы Telegram
+        for i in range(
+            0,
+            len(answer),
+            3900
+        ):
+
+            await message.answer(
+                answer[i:i + 3900]
+            )
+
+    except Exception as e:
+
+        await message.answer(
+            "❌ Не удалось подключиться "
+            "к AI.\n\n"
+            f"<code>{str(e)[:1000]}</code>"
+        )
+
+
+# =========================================================
+# ЗАПУСК
+# =========================================================
+
+async def main():
+
+    load_memory()
+
+    print()
+    print("==============================")
+    print("       LOCAL AI BOT")
+    print("==============================")
+    print(
+        "Model:",
+        MODEL
+    )
+    print(
+        "Ollama:",
+        OLLAMA_URL
+    )
+    print("==============================")
+    print()
+
+    await dp.start_polling(
+        bot
+    )
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "Бот остановлен."
+        )
