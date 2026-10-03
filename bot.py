@@ -21,7 +21,7 @@ from aiogram.types import (
 # НАСТРОЙКИ
 # =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_ТОКЕН")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7705314975:AAGpe-DrPVwxqeBvCK72dZIYP4YvPkzLBLQ")
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL",
