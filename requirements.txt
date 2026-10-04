@@ -1,2 +1,5 @@
 aiogram==3.13.1
 groq==0.11.0
+pydantic==2.8.2
+pydantic-core==2.20.1
+
