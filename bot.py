@@ -7,7 +7,7 @@ from groq import AsyncGroq
 # =========================================================
 # Вставьте ваши новые ключи, просто разделив их на две части:
 # =========================================================
-TELEGRAM_TOKEN = "7705314975 :AAFp3WHFmkrMExAVD8_OhsqmbkaAJP_5-Bc"
+TELEGRAM_TOKEN = "7705314975:AAFp3WHFmkrMExAVD8_OhsqmbkaAJP_5-Bc"
 GROQ_API_KEY = "gsk_hplR6LzW92PFutAoGhCjWGdyb3F" + "Y7TDZ9UxI7iZu8Wp46HkRBRT9"
 
 bot = Bot(token=TELEGRAM_TOKEN)
