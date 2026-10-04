@@ -1,5 +1,2 @@
-groq 
-duckduckgo-search 
-aiogram==3.20.0
-aiohttp
-beautifulsoup4
+aiogram==3.13.1
+groq==0.11.0
