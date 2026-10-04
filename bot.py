@@ -14,6 +14,9 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # ============================================================
 # НАСТРОЙКИ
@@ -25,6 +28,10 @@ MEMORY_FILE = Path("memory.json")
 MAX_SEARCH_RESULTS = 5
 MAX_AUTONOMOUS_STEPS = 5
 
+# Состояния для корректной работы кнопок
+class BotStates(StatesGroup):
+    waiting_for_search_query = State()
+
 # ============================================================
 # ПАМЯТЬ
 # ============================================================
@@ -33,26 +40,18 @@ def load_memory():
     default_structure = {
         "knowledge": [],
         "questions": [],
-        "stats": {
-            "questions": 0,
-            "searches": 0,
-            "learned": 0
-        }
+        "stats": {"questions": 0, "searches": 0, "learned": 0}
     }
-
     if not MEMORY_FILE.exists():
         return default_structure
-
     try:
         with open(MEMORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-
         for key in default_structure:
             data.setdefault(key, default_structure[key])
-
         return data
     except Exception as e:
-        print("Ошибка загрузки памяти:", e)
+        print("Ошибка памяти:", e)
         return default_structure
 
 memory = load_memory()
@@ -62,11 +61,7 @@ def save_memory():
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(memory, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print("Ошибка сохранения памяти:", e)
-
-# ============================================================
-# ОЧИСТКА И ФОРМАТИРОВАНИЕ
-# ============================================================
+        print("Ошибка сохранения:", e)
 
 def clean_text(text: str) -> str:
     if not text:
@@ -81,12 +76,8 @@ def escape_html(text: str) -> str:
 # TELEGRAM BOT
 # ============================================================
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
-
-dp = Dispatcher()
+bot = Bot(token=BOT_TOKEN, default_bot_properties=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher(storage=MemoryStorage())
 running_tasks = {}
 
 def main_keyboard():
@@ -100,102 +91,97 @@ def main_keyboard():
                 InlineKeyboardButton(text="📚 Память", callback_data="memory"),
                 InlineKeyboardButton(text="📊 Статус", callback_data="status")
             ],
-            [
-                InlineKeyboardButton(text="🤖 Автономный режим", callback_data="autonomous")
-            ],
-            [
-                InlineKeyboardButton(text="⛔ Остановить", callback_data="stop")
-            ]
+            [InlineKeyboardButton(text="🤖 Автономный режим", callback_data="autonomous")],
+            [InlineKeyboardButton(text="⛔ Остановить", callback_data="stop")]
         ]
     )
 
 # ============================================================
-# РАБОЧИЙ ПОИСК (DuckDuckGo Lite)
+# НАДЕЖНЫЙ МНОГОУРОВНЕВЫЙ ПОИСК (DuckDuckGo + Wikipedia Fallback)
 # ============================================================
 
 async def web_search(query: str, limit: int = MAX_SEARCH_RESULTS):
-    encoded = quote(query)
-    url = "https://lite.duckduckgo.com/lite/"
-
+    """Надежный поисковик с автозаменой заголовков и защитой от блокировок."""
+    clean_q = clean_text(query)
+    encoded = quote(clean_q)
+    
+    # 1. Запрос к DuckDuckGo Lite с эмуляцией браузера
+    url = "https://html.duckduckgo.com/html/"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
-        "Content-Type": "application/x-www-form-urlencoded"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
+    results = []
+
     try:
-        timeout = aiohttp.ClientTimeout(total=12)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.post(url, data=f"q={encoded}") as response:
-                if response.status != 200:
-                    return []
-                html_doc = await response.text()
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, data={"q": clean_q}, headers=headers) as response:
+                if response.status == 200:
+                    html_doc = await response.text()
+                    soup = BeautifulSoup(html_doc, "html.parser")
+                    
+                    for res in soup.select(".result"):
+                        title_elem = res.select_one(".result__title")
+                        snippet_elem = res.select_one(".result__snippet")
+                        url_elem = res.select_one(".result__url")
 
-        soup = BeautifulSoup(html_doc, "html.parser")
-        results = []
+                        if title_elem:
+                            title = clean_text(title_elem.get_text())
+                            snippet = clean_text(snippet_elem.get_text()) if snippet_elem else ""
+                            link = clean_text(url_elem.get_text()) if url_elem else ""
 
-        rows = soup.find_all("tr")
-        for i in range(0, len(rows) - 1):
-            link = rows[i].find("a", class_="result-link")
-            snippet = rows[i + 1].find("td", class_="result-snippet") if i + 1 < len(rows) else None
+                            if title and len(title) > 3:
+                                results.append({"title": title, "url": link, "description": snippet})
 
-            if link:
-                title_text = clean_text(link.get_text())
-                url_text = link.get("href", "")
-                desc_text = clean_text(snippet.get_text()) if snippet else ""
-
-                if url_text and title_text:
-                    results.append({
-                        "title": title_text,
-                        "url": url_text,
-                        "description": desc_text
-                    })
-
-                if len(results) >= limit:
-                    break
-
-        memory["stats"]["searches"] += 1
-        save_memory()
-        return results
-
+                        if len(results) >= limit:
+                            break
     except Exception as e:
-        print("Ошибка поиска:", e)
-        return []
+        print("Ошибка DDG:", e)
 
-# ============================================================
-# ПАМЯТЬ И ОБРАБОТКА
-# ============================================================
+    # 2. Если DDG заблокировал, делаем резервный поиск по Wikipedia API
+    if not results:
+        try:
+            wiki_url = f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded}&format=json"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(wiki_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        search_items = data.get("query", {}).get("search", [])
+                        for item in search_items[:limit]:
+                            snippet_clean = re.sub(r"<[^>]+>", "", item.get("snippet", ""))
+                            results.append({
+                                "title": item.get("title", ""),
+                                "url": f"https://ru.wikipedia.org/wiki/{quote(item.get('title', ''))}",
+                                "description": clean_text(snippet_clean)
+                            })
+        except Exception as e:
+            print("Ошибка Wiki:", e)
 
-def save_knowledge(question, answer, sources=None, confidence=0.7):
-    if sources is None:
-        sources = []
-
-    q_clean = clean_text(question)
-    a_clean = clean_text(answer)
-
-    if not q_clean or not a_clean:
-        return
-
-    for item in memory["knowledge"]:
-        if item["question"].lower() == q_clean.lower():
-            item["answer"] = a_clean
-            item["sources"] = sources
-            item["confidence"] = confidence
-            item["updated"] = time.time()
-            save_memory()
-            return
-
-    memory["knowledge"].append({
-        "question": q_clean,
-        "answer": a_clean,
-        "sources": sources,
-        "confidence": confidence,
-        "created": time.time(),
-        "updated": time.time()
-    })
-    memory["stats"]["learned"] += 1
+    memory["stats"]["searches"] += 1
     save_memory()
+    return results
 
-def search_memory(question):
+# ============================================================
+# АНАЛИЗ И СБОРКА ОТВЕТА
+# ============================================================
+
+def build_answer(question: str, results: list):
+    if not results:
+        return None
+
+    text_blocks = []
+    for r in results:
+        if r["description"]:
+            text_blocks.append(f"• <b>{r['title']}</b>: {r['description']}")
+        else:
+            text_blocks.append(f"• <b>{r['title']}</b>")
+
+    return "\n\n".join(text_blocks)
+
+def search_memory(question: str):
     words_q = set(re.findall(r"[а-яА-Яa-zA-ZёЁ]{3,}", question.lower()))
     if not words_q:
         return None
@@ -214,280 +200,129 @@ def search_memory(question):
 
     return best if best_score >= 2 else None
 
-def build_answer(question, results):
-    if not results:
-        return None
+def save_knowledge(question, answer, sources=None):
+    if sources is None:
+        sources = []
+    q_clean = clean_text(question)
+    a_clean = clean_text(answer)
 
-    blocks = []
-    for r in results:
-        t = r["title"]
-        d = r["description"]
-        blocks.append(f"{t}. {d}" if d else t)
-
-    full_text = clean_text(" ".join(blocks))
-    if not full_text:
-        return None
-
-    sentences = re.split(r"(?<=[.!?])\s+", full_text)
-    q_words = set(re.findall(r"[а-яА-Яa-zA-ZёЁ]{3,}", question.lower()))
-
-    scored = []
-    for s in sentences:
-        s_words = set(re.findall(r"[а-яА-Яa-zA-ZёЁ]{3,}", s.lower()))
-        score = len(q_words.intersection(s_words))
-        if len(s) > 20:
-            scored.append((score, s))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    selected = []
-    for score, s in scored:
-        if s not in selected:
-            selected.append(s)
-        if len(selected) >= 4:
-            break
-
-    if not selected:
-        selected = sentences[:3]
-
-    ans = " ".join(selected)
-    return ans[:1500] if len(ans) > 1500 else ans
+    memory["knowledge"].append({
+        "question": q_clean,
+        "answer": a_clean,
+        "sources": sources,
+        "created": time.time()
+    })
+    memory["stats"]["learned"] += 1
+    save_memory()
 
 # ============================================================
-# ПРОВЕРКА НА БЫТОВЫЕ ФРАЗЫ (SMALL TALK)
+# РАЗГОВОРНЫЙ ФИЛЬТР (SMALL TALK)
 # ============================================================
 
 def check_small_talk(text: str) -> str | None:
     t = text.lower().strip()
 
     greetings = ["привет", "здравствуй", "добрый день", "добрый вечер", "доброе утро", "хай", "хеллоу"]
-    if any(g in t for g in greetings) and len(t.split()) <= 3:
-        return "👋 Привет! Я автономный бот. Задай мне любой информационный вопрос, и я найду на него ответ!"
+    if any(g == t or t.startswith(g) for g in greetings) and len(t.split()) <= 3:
+        return "👋 Привет! Чем я могу помочь? Задай мне любой вопрос или используй кнопку «Поиск»."
 
-    how_are_you = ["как дела", "как ты", "как жизнь", "что делаешь"]
+    how_are_you = ["как дела", "как ты", "что делаешь"]
     if any(h in t for h in how_are_you):
-        return "🤖 У меня всё отлично! Готов искать информацию и сохранять знания. Что тебя интересует?"
+        return "🤖 У меня всё отлично! Готов искать информацию в сети и отвечать на твои вопросы."
 
     thanks = ["спасибо", "благодарю", "спс"]
     if any(th in t for th in thanks) and len(t.split()) <= 2:
-        return "😊 Рад был помочь! Если есть еще вопросы — обращайся."
-
-    who = ["кто ты", "что ты умеешь", "расскажи о себе"]
-    if any(w in t for w in who):
-        return (
-            "🤖 Я обучаемый автономный бот.\n\n"
-            "• Ищу ответы на вопросы в интернете;\n"
-            "• Запоминаю новые факты в память;\n"
-            "• Могу работать в автономном режиме самостоятельного обучения."
-        )
+        return "😊 Всегда рад помочь!"
 
     return None
 
 # ============================================================
-# ОБРАБОТКА ВОПРОСА
+# ОБРАБОТЧИКИ СООБЩЕНИЙ
 # ============================================================
 
-async def answer_question(message: Message):
-    raw_text = clean_text(message.text)
-    if not raw_text:
-        return
+async def process_search_and_reply(message: Message, query: str):
+    status_msg = await message.answer("🔎 Ищу информацию...")
 
-    # 1. Проверяем бытовые фразы
-    small_talk_reply = check_small_talk(raw_text)
-    if small_talk_reply:
-        await message.answer(small_talk_reply)
-        return
-
-    memory["stats"]["questions"] += 1
-    save_memory()
-
-    status_msg = await message.answer("🤔 Проверяю память и ищу информацию...")
-
-    # 2. Проверяем память
-    remembered = search_memory(raw_text)
+    # 1. Проверяем собственную память
+    remembered = search_memory(query)
     if remembered:
         safe_ans = escape_html(remembered["answer"])
-        conf = round(remembered["confidence"] * 100)
-        await status_msg.edit_text(
-            f"🧠 <b>Нашёл в памяти:</b>\n\n{safe_ans}\n\n📌 Уверенность: {conf}%"
-        )
+        await status_msg.edit_text(f"🧠 <b>Нашёл в своей памяти:</b>\n\n{safe_ans}")
         return
 
-    # 3. Ищем в сети
-    results = await web_search(raw_text)
+    # 2. Ищем через рабочий парсер
+    results = await web_search(query)
     if not results:
-        await status_msg.edit_text("❌ Не удалось найти информацию по этому запросу.")
+        await status_msg.edit_text("❌ По вашему запросу ничего не найдено. Попробуйте уточнить формулировку.")
         return
 
-    answer = build_answer(raw_text, results)
-    if not answer:
-        await status_msg.edit_text("❌ Результаты найдены, но сформулировать ответ не удалось.")
-        return
+    answer = build_answer(query, results)
+    sources = [r["url"] for r in results if r["url"]]
+    save_knowledge(query, answer, sources)
 
-    sources = [r["url"] for r in results[:4]]
-    save_knowledge(raw_text, answer, sources)
-
-    safe_ans = escape_html(answer)
-    await status_msg.edit_text(
-        f"🤖 <b>Ответ:</b>\n\n{safe_ans}\n\n🧠 <i>Сохранено в память.</i>"
-    )
-
-# ============================================================
-# КОМАНДЫ TELEGRAM
-# ============================================================
+    await status_msg.edit_text(f"🌐 <b>Результаты поиска по запросу «{escape_html(query)}»:</b>\n\n{answer}")
 
 @dp.message(Command("start"))
-async def start(message: Message):
+async def start(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer(
-        "🤖 <b>Бот запущен и готов к работе.</b>\n\n"
-        "Напишите мне любой поисковый вопрос или используйте меню ниже.",
+        "🤖 <b>Бот готов к работе.</b>\n\nЗадайте вопрос текстом или выберите действие:",
         reply_markup=main_keyboard()
     )
 
-@dp.message(Command("search"))
-async def search_command(message: Message):
-    query = message.text.replace("/search", "", 1).strip()
-    if not query:
-        await message.answer("Пример: <code>/search погода в Киеве</code>")
+@dp.callback_query(F.data == "search")
+async def cb_search(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(BotStates.waiting_for_search_query)
+    await cb.message.answer("🔍 <b>Введите поисковый запрос:</b>")
+
+@dp.message(BotStates.waiting_for_search_query)
+async def handle_search_state(message: Message, state: FSMContext):
+    await state.clear()
+    await process_search_and_reply(message, message.text)
+
+@dp.message(F.text)
+async def handle_all_text(message: Message):
+    if message.text.startswith("/"):
         return
 
-    status_msg = await message.answer("🌐 Ищу...")
-    results = await web_search(query)
-
-    if not results:
-        await status_msg.edit_text("❌ Ничего не найдено.")
+    # Проверка на обычное приветствие/разговор
+    small_talk = check_small_talk(message.text)
+    if small_talk:
+        await message.answer(small_talk)
         return
 
-    text = "🌐 <b>Результаты:</b>\n\n"
-    for i, res in enumerate(results, start=1):
-        t = escape_html(res['title'])
-        d = escape_html(res['description'][:150])
-        text += f"<b>{i}. {t}</b>\n{d}\n{res['url']}\n\n"
+    # Если не приветствие — выполняем поиск
+    await process_search_and_reply(message, message.text)
 
-    await status_msg.edit_text(text[:4000])
+# ============================================================
+# КНОПКИ И СТАCУСЫ
+# ============================================================
 
 @dp.message(Command("memory"))
-async def memory_command(message: Message):
-    await message.answer(
-        "📚 <b>Память:</b>\n\n"
-        f"🧠 Знаний: <b>{len(memory['knowledge'])}</b>\n"
-        f"❓ Вопросов: <b>{memory['stats']['questions']}</b>\n"
-        f"🌐 Поисков: <b>{memory['stats']['searches']}</b>"
+@dp.callback_query(F.data == "memory")
+async def show_memory(event):
+    msg = event.message if isinstance(event, CallbackQuery) else event
+    if isinstance(event, CallbackQuery): await event.answer()
+    await msg.answer(
+        f"📚 <b>Состояние памяти:</b>\n\n"
+        f"🧠 Сохранено знаний: <b>{len(memory['knowledge'])}</b>\n"
+        f"🌐 Поисков выполнено: <b>{memory['stats']['searches']}</b>"
     )
 
 @dp.message(Command("status"))
-async def status_command(message: Message):
-    await message.answer(
-        "📊 <b>Статус:</b>\n\n"
-        f"🧠 Знаний: {len(memory['knowledge'])}\n"
-        f"❓ Вопросов: {memory['stats']['questions']}\n"
-        f"🌐 Поисков: {memory['stats']['searches']}\n"
-        f"🤖 Активных задач: {len(running_tasks)}"
-    )
-
-# ============================================================
-# АВТОНОМНЫЙ РЕЖИМ
-# ============================================================
-
-async def autonomous_learning(chat_id: int):
-    if chat_id in running_tasks:
-        return
-
-    running_tasks[chat_id] = True
-    try:
-        await bot.send_message(chat_id, "🤖 <b>Автономное обучение запущено.</b>")
-
-        topics = ["наука", "технологии", "космос", "история"]
-        for step in range(MAX_AUTONOMOUS_STEPS):
-            if chat_id not in running_tasks:
-                break
-
-            query = topics[step % len(topics)] + " интересные факты"
-            results = await web_search(query, limit=3)
-
-            if results:
-                answer = build_answer(query, results)
-                if answer:
-                    sources = [r["url"] for r in results]
-                    save_knowledge(query, answer, sources)
-                    await bot.send_message(
-                        chat_id,
-                        f"🧠 <b>Новый факт ({step+1}/{MAX_AUTONOMOUS_STEPS}):</b>\n\n"
-                        f"{escape_html(answer[:500])}..."
-                    )
-
-            await asyncio.sleep(4)
-
-        await bot.send_message(chat_id, "✅ <b>Обучение завершено.</b>")
-    except Exception as e:
-        print("Ошибка обучения:", e)
-    finally:
-        running_tasks.pop(chat_id, None)
-
-@dp.message(Command("autonomous"))
-@dp.message(Command("learn"))
-async def start_autonomous(message: Message):
-    chat_id = message.chat.id
-    if chat_id in running_tasks:
-        await message.answer("🧠 Задача уже выполняется.")
-        return
-    asyncio.create_task(autonomous_learning(chat_id))
-
-@dp.message(Command("stop"))
-async def stop_command(message: Message):
-    chat_id = message.chat.id
-    if chat_id in running_tasks:
-        running_tasks.pop(chat_id, None)
-        await message.answer("⛔ Остановка...")
-    else:
-        await message.answer("Нет активных задач.")
-
-# ============================================================
-# CALLBACKS & ALL TEXT
-# ============================================================
-
-@dp.callback_query(F.data == "search")
-async def cb_search(cb: CallbackQuery):
-    await cb.answer()
-    await cb.message.answer("Задайте вопрос текстом или используйте: <code>/search запрос</code>")
-
-@dp.callback_query(F.data == "learn")
-@dp.callback_query(F.data == "autonomous")
-async def cb_learn(cb: CallbackQuery):
-    await cb.answer()
-    chat_id = cb.message.chat.id
-    if chat_id in running_tasks:
-        await cb.message.answer("🧠 Процесс уже идет.")
-        return
-    asyncio.create_task(autonomous_learning(chat_id))
-
-@dp.callback_query(F.data == "memory")
-async def cb_memory(cb: CallbackQuery):
-    await cb.answer()
-    await memory_command(cb.message)
-
 @dp.callback_query(F.data == "status")
-async def cb_status(cb: CallbackQuery):
-    await cb.answer()
-    await status_command(cb.message)
-
-@dp.callback_query(F.data == "stop")
-async def cb_stop(cb: CallbackQuery):
-    await cb.answer()
-    await stop_command(cb.message)
-
-@dp.message(F.text)
-async def handle_text(message: Message):
-    if message.text.startswith("/"):
-        return
-    await answer_question(message)
+async def show_status(event):
+    msg = event.message if isinstance(event, CallbackQuery) else event
+    if isinstance(event, CallbackQuery): await event.answer()
+    await msg.answer(f"📊 Бот работает штатно.\nЗадач в памяти: {len(memory['knowledge'])}")
 
 # ============================================================
 # ЗАПУСК
 # ============================================================
 
 async def main():
-    print("Бот запущен...")
+    print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
