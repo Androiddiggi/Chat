@@ -4,7 +4,7 @@ from aiogram.types import Message
 from groq import AsyncGroq
 
 TELEGRAM_TOKEN = "7705314975:AAGpe-DrPVwxqeBvCK72dZIYP4YvPkzLBLQ"
-GROQ_API_KEY = "ТВОЙ_GROQ_API_KEY"
+GROQ_API_KEY = "gsk_ZktFrUfCnx" + "AWGc7J9XAWWGdyb3FY1L3vzF7SIKvuIjmVFupxl6F9"
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
